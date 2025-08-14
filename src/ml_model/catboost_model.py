@@ -82,11 +82,14 @@ class CatBoostTradingModel:
         """Prepare features and labels from indicator data"""
         try:
             # Convert indicators to DataFrame
-            feature_df = pd.DataFrame()
-            
+            # Collect valid indicators first to avoid DataFrame fragmentation
+            valid_indicators = {}
             for indicator_name, values in data.items():
                 if isinstance(values, (pd.Series, list, np.ndarray)):
-                    feature_df[indicator_name] = values
+                    valid_indicators[indicator_name] = values
+            
+            # Create DataFrame all at once to avoid fragmentation warning
+            feature_df = pd.DataFrame(valid_indicators)
             
             # Remove rows with NaN values
             feature_df = feature_df.dropna()
