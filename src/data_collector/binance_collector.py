@@ -34,31 +34,59 @@ class BinanceDataCollector:
         try:
             logger.info("Initializing Binance data collector...")
             
-            # Initialize Binance client
-            self.client = Client(
-                api_key=BINANCE_API_KEY if BINANCE_API_KEY != "your_binance_api_key_here" else None,
-                api_secret=BINANCE_SECRET_KEY if BINANCE_SECRET_KEY != "your_binance_secret_key_here" else None,
-                testnet=DEMO_MODE
-            )
+            # Check if API keys are configured
+            has_api_keys = (BINANCE_API_KEY != "your_binance_api_key_here" and 
+                           BINANCE_SECRET_KEY != "your_binance_secret_key_here" and 
+                           BINANCE_API_KEY and BINANCE_SECRET_KEY)
             
-            # Initialize CCXT for additional functionality
-            self.ccxt_exchange = ccxt.binance({
-                'apiKey': BINANCE_API_KEY if BINANCE_API_KEY != "your_binance_api_key_here" else None,
-                'secret': BINANCE_SECRET_KEY if BINANCE_SECRET_KEY != "your_binance_secret_key_here" else None,
-                'sandbox': DEMO_MODE,
-                'enableRateLimit': True,
-            })
+            if has_api_keys:
+                logger.info("✅ API keys configured - initializing authenticated client")
+                # Initialize Binance client
+                self.client = Client(
+                    api_key=BINANCE_API_KEY,
+                    api_secret=BINANCE_SECRET_KEY,
+                    testnet=DEMO_MODE
+                )
+                
+                # Initialize CCXT for additional functionality
+                self.ccxt_exchange = ccxt.binance({
+                    'apiKey': BINANCE_API_KEY,
+                    'secret': BINANCE_SECRET_KEY,
+                    'sandbox': DEMO_MODE,
+                    'enableRateLimit': True,
+                })
+                
+                # Test API connection
+                try:
+                    account_info = self.client.get_account()
+                    logger.success(f"✅ API connection successful - Account status: {account_info.get('status', 'UNKNOWN')}")
+                except Exception as api_error:
+                    logger.warning(f"⚠️  API keys configured but connection failed: {api_error}")
+                    logger.info("Falling back to public API mode...")
+                    self.client = None
+                    self.ccxt_exchange = None
+            else:
+                logger.info("⚠️  API keys not configured - using public API only")
+                logger.info("This limits functionality but allows basic market analysis")
+                self.client = None
+                self.ccxt_exchange = None
             
             # Initialize database
             await self.init_database()
             
             # Fetch initial historical data
+            logger.info("📊 Fetching initial market data...")
             await self.fetch_initial_data()
             
-            logger.success("Binance data collector initialized successfully")
+            logger.success("✅ Binance data collector initialized successfully")
             
         except Exception as e:
-            logger.error(f"Failed to initialize data collector: {e}")
+            logger.error(f"❌ Failed to initialize data collector: {e}")
+            logger.error("This may be due to:")
+            logger.error("  1. Missing dependencies (pandas, aiohttp, etc.)")
+            logger.error("  2. Network connectivity issues")
+            logger.error("  3. Invalid API keys")
+            logger.error("  4. Database initialization problems")
             raise
     
     async def init_database(self):
@@ -118,27 +146,43 @@ class BinanceDataCollector:
     async def fetch_initial_data(self):
         """Fetch initial historical data for all supported pairs"""
         try:
-            logger.info("Fetching initial historical data...")
+            logger.info(f"📈 Fetching initial historical data for {len(SUPPORTED_PAIRS)} pairs...")
+            logger.info(f"⏱️  This may take a few moments...")
             
-            for symbol in SUPPORTED_PAIRS:
+            successful_fetches = 0
+            total_candles = 0
+            
+            for i, symbol in enumerate(SUPPORTED_PAIRS, 1):
                 try:
+                    logger.info(f"📊 Fetching data for {symbol} ({i}/{len(SUPPORTED_PAIRS)})...")
+                    
                     # Fetch OHLCV data for the default timeframe
                     data = await self.fetch_historical_data(symbol, DEFAULT_TIMEFRAME, MAX_HISTORICAL_DAYS)
                     if data is not None and len(data) > 0:
                         await self.store_market_data(symbol, DEFAULT_TIMEFRAME, data)
-                        logger.info(f"Fetched {len(data)} candles for {symbol}")
+                        successful_fetches += 1
+                        total_candles += len(data)
+                        logger.success(f"✅ Fetched {len(data)} candles for {symbol}")
+                    else:
+                        logger.warning(f"⚠️  No data received for {symbol}")
                     
                     # Small delay to avoid rate limits
                     await asyncio.sleep(0.1)
                     
                 except Exception as e:
-                    logger.warning(f"Failed to fetch initial data for {symbol}: {e}")
+                    logger.error(f"❌ Failed to fetch initial data for {symbol}: {e}")
                     continue
             
-            logger.success("Initial data fetch completed")
+            if successful_fetches > 0:
+                logger.success(f"🎉 Initial data fetch completed: {successful_fetches}/{len(SUPPORTED_PAIRS)} pairs, {total_candles} total candles")
+            else:
+                logger.error("❌ No initial data could be fetched for any pairs")
+                logger.error("This may prevent market analysis from working properly")
+                logger.error("Check your internet connection and try again")
             
         except Exception as e:
-            logger.error(f"Failed to fetch initial data: {e}")
+            logger.error(f"❌ Failed to fetch initial data: {e}")
+            logger.error("The system will continue but analysis may be limited")
     
     async def fetch_historical_data(self, symbol: str, timeframe: str, days: int) -> Optional[pd.DataFrame]:
         """Fetch historical OHLCV data for a symbol"""
