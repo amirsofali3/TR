@@ -84,16 +84,25 @@ jupyter==1.0.0
 ipython==8.18.1
 ```
 
-## 🛠️ Installation
+## 🛠️ Installation & Quick Start
 
+### Option 1: Smart Startup (Recommended)
+The easiest way to get started - automatically handles dependency installation:
+```bash
+python start.py
+```
+
+### Option 2: Manual Installation  
 1. **Clone the repository**
 ```bash
 git clone <repository-url>
 cd TR
 ```
 
-2. **Install dependencies**
+2. **Install core dependencies**
 ```bash
+pip install loguru aiohttp pandas numpy flask
+# OR install all dependencies
 pip install -r requirements.txt
 ```
 
@@ -104,19 +113,35 @@ BINANCE_API_KEY = "your_api_key_here"
 BINANCE_SECRET_KEY = "your_secret_key_here"
 ```
 
-4. **Run basic tests**
-```bash
-python test_basic.py
-```
-
-5. **Start the system**
+4. **Start the system**
 ```bash
 python main.py
 ```
 
-6. **Open dashboard**
+5. **Open dashboard**
 ```
 http://localhost:5000
+```
+
+### 🔍 Troubleshooting Startup Issues
+
+**Problem**: System doesn't start analysis / "No module named 'loguru'" errors
+**Solution**: Missing dependencies. Use one of these methods:
+```bash
+# Method 1: Smart installer
+python start.py
+
+# Method 2: Manual install
+pip install loguru aiohttp pandas numpy flask
+
+# Method 3: Diagnostics
+python diagnose.py
+```
+
+**Problem**: "Failed to initialize components"
+**Solution**: Run diagnostics to identify the specific issue:
+```bash
+python diagnose.py
 ```
 
 ## 📊 Technical Indicators
