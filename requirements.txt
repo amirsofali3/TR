@@ -1,0 +1,68 @@
+# Core Data Science and ML
+pandas==2.1.4
+numpy==1.24.4
+scikit-learn==1.3.2
+catboost==1.2.2
+ta-lib==0.4.26
+talib-binary==0.4.26
+
+# Real-time Data and APIs
+python-binance==1.0.19
+websockets==12.0
+aiohttp==3.9.1
+ccxt==4.1.74
+
+# Database
+sqlalchemy==2.0.23
+sqlite3  # Built-in
+psycopg2-binary==2.9.9
+
+# Web Framework
+flask==3.0.0
+flask-socketio==5.3.6
+flask-cors==4.0.0
+gunicorn==21.2.0
+
+# Data Visualization
+plotly==5.17.0
+matplotlib==3.8.2
+seaborn==0.13.0
+
+# Utility Libraries
+python-dotenv==1.0.0
+schedule==1.2.0
+pytz==2023.3
+python-dateutil==2.8.2
+requests==2.31.0
+urllib3==2.1.0
+
+# Logging and Monitoring
+loguru==0.7.2
+
+# Configuration
+pyyaml==6.0.1
+configparser==6.0.0
+
+# Mathematical Operations
+scipy==1.11.4
+statsmodels==0.14.1
+
+# Performance
+numba==0.58.1
+joblib==1.3.2
+
+# File Operations
+openpyxl==3.1.2
+xlsxwriter==3.1.9
+
+# Async Operations
+asyncio  # Built-in
+concurrent.futures  # Built-in
+
+# Testing
+pytest==7.4.3
+pytest-asyncio==0.21.1
+
+# Development
+jupyter==1.0.0
+ipython==8.18.1
