@@ -112,12 +112,15 @@ class TradingEngine:
                 return None
             
             # Prepare feature data (use last row for prediction)
-            feature_df = pd.DataFrame()
-            
+            # Collect valid indicators first to avoid DataFrame fragmentation
+            valid_indicators = {}
             for indicator_name, values in indicators.items():
                 if isinstance(values, (pd.Series, list)):
                     if len(values) > 0:
-                        feature_df[indicator_name] = values
+                        valid_indicators[indicator_name] = values
+            
+            # Create DataFrame all at once to avoid fragmentation warning
+            feature_df = pd.DataFrame(valid_indicators)
             
             if len(feature_df) == 0:
                 logger.warning(f"No feature data for {symbol}")
