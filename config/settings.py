@@ -10,11 +10,9 @@ UPDATE_INTERVAL = 60  # Update interval in seconds (1 minute)
 CONFIDENCE_THRESHOLD = 70.0  # Minimum confidence for trade execution
 MAX_POSITIONS = 10  # Maximum number of open positions
 
-# Supported Cryptocurrencies
+# Supported Cryptocurrencies (limited for testing)
 SUPPORTED_PAIRS = [
-    "BTCUSDT", "ETHUSDT", "ADAUSDT", "DOTUSDT", "LINKUSDT",
-    "BNBUSDT", "XRPUSDT", "LTCUSDT", "BCHUSDT", "EOSUSDT",
-    "TRXUSDT", "ETCUSDT", "XLMUSDT", "XMRUSDT", "DASHUSDT"
+    "BTCUSDT", "ETHUSDT", "DOGEUSDT"
 ]
 
 # Database Configuration
