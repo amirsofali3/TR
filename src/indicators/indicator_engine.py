@@ -42,7 +42,10 @@ class IndicatorEngine:
     async def load_indicators_config(self):
         """Load indicators configuration from CSV file"""
         try:
-            csv_path = "/home/runner/work/TR/TR/crypto_trading_feature_encyclopedia.csv"
+            # Use relative path from project root
+            import os
+            project_root = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
+            csv_path = os.path.join(project_root, "crypto_trading_feature_encyclopedia.csv")
             
             with open(csv_path, 'r', encoding='utf-8') as file:
                 reader = csv.DictReader(file)
@@ -81,9 +84,44 @@ class IndicatorEngine:
             logger.info(f"Required indicators: {len(self.required_indicators)}")
             logger.info(f"RFE eligible indicators: {len(self.rfe_eligible_indicators)}")
             
+        except FileNotFoundError:
+            logger.error(f"Indicators CSV file not found at {csv_path}")
+            logger.info("Falling back to default indicators configuration")
+            # Set up minimal default indicators
+            self._setup_default_indicators()
         except Exception as e:
             logger.error(f"Failed to load indicators config: {e}")
-            raise
+            logger.info("Falling back to default indicators configuration")
+            self._setup_default_indicators()
+    
+    def _setup_default_indicators(self):
+        """Setup default indicators when CSV file is not available"""
+        # Core price data indicators (always required)
+        default_indicators = {
+            'Timestamp': {'category': 'Core Price Data', 'must_keep': True, 'rfe_eligible': False},
+            'Open': {'category': 'Core Price Data', 'must_keep': True, 'rfe_eligible': False},
+            'High': {'category': 'Core Price Data', 'must_keep': True, 'rfe_eligible': False},
+            'Low': {'category': 'Core Price Data', 'must_keep': True, 'rfe_eligible': False},
+            'Close': {'category': 'Core Price Data', 'must_keep': True, 'rfe_eligible': False},
+            'Volume': {'category': 'Core Price Data', 'must_keep': True, 'rfe_eligible': False},
+            'Symbol': {'category': 'Core Price Data', 'must_keep': True, 'rfe_eligible': False},
+            # Basic technical indicators
+            'SMA_5': {'category': 'Trend Indicators', 'must_keep': False, 'rfe_eligible': True},
+            'SMA_10': {'category': 'Trend Indicators', 'must_keep': False, 'rfe_eligible': True},
+            'EMA_5': {'category': 'Trend Indicators', 'must_keep': False, 'rfe_eligible': True},
+            'EMA_10': {'category': 'Trend Indicators', 'must_keep': False, 'rfe_eligible': True},
+            'RSI_14': {'category': 'Momentum Indicators', 'must_keep': False, 'rfe_eligible': True},
+        }
+        
+        self.indicators_config = default_indicators
+        
+        for name, config in default_indicators.items():
+            if config['must_keep']:
+                self.required_indicators.add(name)
+            if config['rfe_eligible']:
+                self.rfe_eligible_indicators.add(name)
+        
+        logger.warning(f"Using default configuration with {len(default_indicators)} indicators")
     
     def setup_indicator_functions(self):
         """Setup functions for calculating indicators"""

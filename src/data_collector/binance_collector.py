@@ -215,19 +215,17 @@ class BinanceDataCollector:
             data_to_insert['symbol'] = symbol
             data_to_insert['timeframe'] = timeframe
             
-            # Insert data (replace on conflict)
-            data_to_insert.to_sql('market_data', conn, if_exists='append', index=False)
-            
-            # Remove duplicates (keep latest)
+            # Use INSERT OR REPLACE to handle duplicates
             cursor = conn.cursor()
-            cursor.execute('''
-                DELETE FROM market_data 
-                WHERE rowid NOT IN (
-                    SELECT MAX(rowid) 
-                    FROM market_data 
-                    GROUP BY symbol, timeframe, timestamp
-                )
-            ''')
+            for _, row in data_to_insert.iterrows():
+                cursor.execute('''
+                    INSERT OR REPLACE INTO market_data 
+                    (symbol, timeframe, timestamp, open, high, low, close, volume)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ''', (
+                    row['symbol'], row['timeframe'], row['timestamp'],
+                    row['open'], row['high'], row['low'], row['close'], row['volume']
+                ))
             
             conn.commit()
             conn.close()
