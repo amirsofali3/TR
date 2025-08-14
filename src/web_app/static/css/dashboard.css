@@ -1,0 +1,266 @@
+/* Dashboard CSS Styles */
+
+/* Blinking lights for indicators */
+.blinking-light {
+    display: inline-block;
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    animation: blink 1.5s infinite;
+}
+
+.blinking-light.active {
+    background-color: #28a745;
+    box-shadow: 0 0 10px #28a745;
+}
+
+.blinking-light.inactive {
+    background-color: #dc3545;
+    box-shadow: 0 0 10px #dc3545;
+}
+
+@keyframes blink {
+    0%, 50% { opacity: 1; }
+    51%, 100% { opacity: 0.3; }
+}
+
+/* Indicator list styles */
+.indicator-list {
+    font-size: 0.85rem;
+}
+
+.indicator-item {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 0.25rem 0.5rem;
+    margin-bottom: 0.25rem;
+    border-radius: 0.25rem;
+    background-color: rgba(0, 0, 0, 0.05);
+}
+
+.indicator-item.active {
+    border-left: 3px solid #28a745;
+}
+
+.indicator-item.inactive {
+    border-left: 3px solid #dc3545;
+}
+
+.indicator-name {
+    font-weight: 500;
+}
+
+.indicator-importance {
+    font-size: 0.75rem;
+    color: #6c757d;
+}
+
+/* Price display styles */
+.price-item {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 0.5rem;
+    margin-bottom: 0.5rem;
+    border-radius: 0.25rem;
+    background-color: rgba(0, 0, 0, 0.05);
+    border-left: 3px solid #007bff;
+}
+
+.price-symbol {
+    font-weight: bold;
+    color: #495057;
+}
+
+.price-value {
+    font-weight: 600;
+    color: #28a745;
+}
+
+/* Position styles */
+.position-item {
+    border: 1px solid #dee2e6;
+    border-radius: 0.5rem;
+    padding: 1rem;
+    margin-bottom: 1rem;
+    background-color: #f8f9fa;
+}
+
+.position-item.buy {
+    border-left: 4px solid #28a745;
+}
+
+.position-item.sell {
+    border-left: 4px solid #dc3545;
+}
+
+.position-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 0.5rem;
+}
+
+.position-symbol {
+    font-weight: bold;
+    font-size: 1.1rem;
+}
+
+.position-side {
+    padding: 0.25rem 0.5rem;
+    border-radius: 0.25rem;
+    font-size: 0.75rem;
+    font-weight: bold;
+}
+
+.position-side.buy {
+    background-color: #d4edda;
+    color: #155724;
+}
+
+.position-side.sell {
+    background-color: #f8d7da;
+    color: #721c24;
+}
+
+.position-details {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 0.5rem;
+    font-size: 0.85rem;
+}
+
+.position-detail {
+    display: flex;
+    justify-content: space-between;
+}
+
+.position-pnl.positive {
+    color: #28a745;
+    font-weight: bold;
+}
+
+.position-pnl.negative {
+    color: #dc3545;
+    font-weight: bold;
+}
+
+/* Signal table styles */
+.signal-buy {
+    color: #28a745;
+    font-weight: bold;
+}
+
+.signal-sell {
+    color: #dc3545;
+    font-weight: bold;
+}
+
+.signal-hold {
+    color: #6c757d;
+}
+
+.confidence-high {
+    color: #28a745;
+    font-weight: bold;
+}
+
+.confidence-medium {
+    color: #ffc107;
+    font-weight: bold;
+}
+
+.confidence-low {
+    color: #dc3545;
+}
+
+/* Status badges */
+.status-executed {
+    background-color: #28a745 !important;
+}
+
+.status-pending {
+    background-color: #ffc107 !important;
+}
+
+/* Progress bar animations */
+.progress-bar {
+    transition: width 0.3s ease;
+}
+
+/* Card hover effects */
+.card {
+    transition: transform 0.2s ease, box-shadow 0.2s ease;
+}
+
+.card:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 4px 8px rgba(0, 0, 0, 0.1);
+}
+
+/* Loading animation */
+.loading {
+    display: inline-block;
+    width: 20px;
+    height: 20px;
+    border: 3px solid #f3f3f3;
+    border-top: 3px solid #007bff;
+    border-radius: 50%;
+    animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+    0% { transform: rotate(0deg); }
+    100% { transform: rotate(360deg); }
+}
+
+/* Responsive adjustments */
+@media (max-width: 768px) {
+    .fixed-bottom {
+        position: relative;
+        margin-top: 2rem;
+    }
+    
+    .position-details {
+        grid-template-columns: 1fr;
+    }
+    
+    .card-body {
+        padding: 1rem 0.75rem;
+    }
+}
+
+/* Custom scrollbar */
+.indicator-list::-webkit-scrollbar,
+#current-prices::-webkit-scrollbar {
+    width: 6px;
+}
+
+.indicator-list::-webkit-scrollbar-track,
+#current-prices::-webkit-scrollbar-track {
+    background: #f1f1f1;
+    border-radius: 3px;
+}
+
+.indicator-list::-webkit-scrollbar-thumb,
+#current-prices::-webkit-scrollbar-thumb {
+    background: #c1c1c1;
+    border-radius: 3px;
+}
+
+.indicator-list::-webkit-scrollbar-thumb:hover,
+#current-prices::-webkit-scrollbar-thumb:hover {
+    background: #a1a1a1;
+}
+
+/* System status indicator */
+#system-status.bg-success {
+    animation: pulse 2s infinite;
+}
+
+@keyframes pulse {
+    0% { opacity: 1; }
+    50% { opacity: 0.7; }
+    100% { opacity: 1; }
+}
