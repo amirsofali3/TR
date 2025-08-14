@@ -54,7 +54,7 @@ class TradingSystem:
             level=LOG_LEVEL,
             format="{time:YYYY-MM-DD HH:mm:ss} | {level: <8} | {name}:{function}:{line} - {message}",
             rotation=f"{MAX_LOG_SIZE} MB",
-            retention=f"{BACKUP_COUNT} files"
+            retention=BACKUP_COUNT
         )
     
     async def initialize_components(self):
