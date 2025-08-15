@@ -1,5 +1,6 @@
 """
 Advanced Risk Management System with Step-wise TP/SL
+MySQL migration support
 """
 
 import asyncio
@@ -10,6 +11,9 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 import sqlite3
 import json
+
+# Import database manager for MySQL migration
+from src.database.db_manager import db_manager
 
 from config.settings import *
 
@@ -87,78 +91,138 @@ class RiskManagementSystem:
             raise
     
     async def init_database(self):
-        """Initialize database tables for positions and P&L tracking"""
+        """Initialize database tables for positions and P&L tracking (MySQL migration)"""
         try:
-            conn = sqlite3.connect(self.db_path)
-            cursor = conn.cursor()
-            
-            # Positions table
-            cursor.execute('''
-                CREATE TABLE IF NOT EXISTS positions (
-                    position_id TEXT PRIMARY KEY,
-                    symbol TEXT NOT NULL,
-                    side TEXT NOT NULL,
-                    entry_price REAL NOT NULL,
-                    quantity REAL NOT NULL,
-                    remaining_quantity REAL NOT NULL,
-                    entry_time TIMESTAMP NOT NULL,
-                    tp_levels TEXT,
-                    tp_quantities TEXT,
-                    current_tp_level INTEGER DEFAULT 0,
-                    initial_sl REAL,
-                    current_sl REAL,
-                    realized_pnl REAL DEFAULT 0,
-                    unrealized_pnl REAL DEFAULT 0,
-                    confidence REAL DEFAULT 0,
-                    is_active BOOLEAN DEFAULT TRUE,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                )
-            ''')
-            
-            # P&L tracking table
-            cursor.execute('''
-                CREATE TABLE IF NOT EXISTS pnl_history (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    date TEXT NOT NULL,
-                    symbol TEXT,
-                    realized_pnl REAL DEFAULT 0,
-                    unrealized_pnl REAL DEFAULT 0,
-                    total_pnl REAL DEFAULT 0,
-                    portfolio_balance REAL DEFAULT 0,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    UNIQUE(date, symbol)
-                )
-            ''')
-            
-            # TP/SL configurations table
-            cursor.execute('''
-                CREATE TABLE IF NOT EXISTS tp_sl_configs (
-                    symbol TEXT PRIMARY KEY,
-                    tp_levels TEXT,
-                    sl_percentage REAL,
-                    trailing_step REAL,
-                    max_positions INTEGER,
-                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                )
-            ''')
-            
-            # Trade history table
-            cursor.execute('''
-                CREATE TABLE IF NOT EXISTS trade_history (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    position_id TEXT,
-                    symbol TEXT NOT NULL,
-                    side TEXT NOT NULL,
-                    action TEXT NOT NULL,  -- 'OPEN', 'TP', 'SL', 'CLOSE'
-                    price REAL NOT NULL,
-                    quantity REAL NOT NULL,
-                    pnl REAL DEFAULT 0,
-                    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                )
-            ''')
-            
-            conn.commit()
-            conn.close()
+            if db_manager.backend == 'mysql':
+                # MySQL schema
+                db_manager.execute('''
+                    CREATE TABLE IF NOT EXISTS positions (
+                        position_id VARCHAR(100) PRIMARY KEY,
+                        symbol VARCHAR(20) NOT NULL,
+                        side VARCHAR(10) NOT NULL,
+                        entry_price DECIMAL(20,8) NOT NULL,
+                        quantity DECIMAL(20,8) NOT NULL,
+                        remaining_quantity DECIMAL(20,8) NOT NULL,
+                        entry_time TIMESTAMP NOT NULL,
+                        tp_levels TEXT,
+                        tp_quantities TEXT,
+                        current_tp_level INT DEFAULT 0,
+                        initial_sl DECIMAL(20,8),
+                        current_sl DECIMAL(20,8),
+                        realized_pnl DECIMAL(20,8) DEFAULT 0,
+                        unrealized_pnl DECIMAL(20,8) DEFAULT 0,
+                        confidence DECIMAL(5,2) DEFAULT 0,
+                        is_active BOOLEAN DEFAULT TRUE,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    ) ENGINE=InnoDB
+                ''')
+                
+                # P&L tracking table
+                db_manager.execute('''
+                    CREATE TABLE IF NOT EXISTS pnl_history (
+                        id INT AUTO_INCREMENT PRIMARY KEY,
+                        date VARCHAR(20) NOT NULL,
+                        symbol VARCHAR(20),
+                        realized_pnl DECIMAL(20,8) DEFAULT 0,
+                        unrealized_pnl DECIMAL(20,8) DEFAULT 0,
+                        total_pnl DECIMAL(20,8) DEFAULT 0,
+                        portfolio_balance DECIMAL(20,8) DEFAULT 0,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        UNIQUE KEY unique_pnl_date (date, symbol)
+                    ) ENGINE=InnoDB
+                ''')
+                
+                # TP/SL configurations table
+                db_manager.execute('''
+                    CREATE TABLE IF NOT EXISTS tp_sl_configs (
+                        symbol VARCHAR(20) PRIMARY KEY,
+                        tp_levels TEXT,
+                        sl_percentage DECIMAL(5,4),
+                        trailing_step DECIMAL(5,4),
+                        max_positions INT,
+                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+                    ) ENGINE=InnoDB
+                ''')
+                
+                # Trade history table
+                db_manager.execute('''
+                    CREATE TABLE IF NOT EXISTS trade_history (
+                        id INT AUTO_INCREMENT PRIMARY KEY,
+                        position_id VARCHAR(100),
+                        symbol VARCHAR(20) NOT NULL,
+                        side VARCHAR(10) NOT NULL,
+                        action VARCHAR(10) NOT NULL,  -- 'OPEN', 'TP', 'SL', 'CLOSE'
+                        price DECIMAL(20,8) NOT NULL,
+                        quantity DECIMAL(20,8) NOT NULL,
+                        pnl DECIMAL(20,8) DEFAULT 0,
+                        timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    ) ENGINE=InnoDB
+                ''')
+            else:
+                # SQLite schema (original)
+                db_manager.execute('''
+                    CREATE TABLE IF NOT EXISTS positions (
+                        position_id TEXT PRIMARY KEY,
+                        symbol TEXT NOT NULL,
+                        side TEXT NOT NULL,
+                        entry_price REAL NOT NULL,
+                        quantity REAL NOT NULL,
+                        remaining_quantity REAL NOT NULL,
+                        entry_time TIMESTAMP NOT NULL,
+                        tp_levels TEXT,
+                        tp_quantities TEXT,
+                        current_tp_level INTEGER DEFAULT 0,
+                        initial_sl REAL,
+                        current_sl REAL,
+                        realized_pnl REAL DEFAULT 0,
+                        unrealized_pnl REAL DEFAULT 0,
+                        confidence REAL DEFAULT 0,
+                        is_active BOOLEAN DEFAULT TRUE,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    )
+                ''')
+                
+                # P&L tracking table
+                db_manager.execute('''
+                    CREATE TABLE IF NOT EXISTS pnl_history (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        date TEXT NOT NULL,
+                        symbol TEXT,
+                        realized_pnl REAL DEFAULT 0,
+                        unrealized_pnl REAL DEFAULT 0,
+                        total_pnl REAL DEFAULT 0,
+                        portfolio_balance REAL DEFAULT 0,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        UNIQUE(date, symbol)
+                    )
+                ''')
+                
+                # TP/SL configurations table
+                db_manager.execute('''
+                    CREATE TABLE IF NOT EXISTS tp_sl_configs (
+                        symbol TEXT PRIMARY KEY,
+                        tp_levels TEXT,
+                        sl_percentage REAL,
+                        trailing_step REAL,
+                        max_positions INTEGER,
+                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    )
+                ''')
+                
+                # Trade history table
+                db_manager.execute('''
+                    CREATE TABLE IF NOT EXISTS trade_history (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        position_id TEXT,
+                        symbol TEXT NOT NULL,
+                        side TEXT NOT NULL,
+                        action TEXT NOT NULL,  -- 'OPEN', 'TP', 'SL', 'CLOSE'
+                        price REAL NOT NULL,
+                        quantity REAL NOT NULL,
+                        pnl REAL DEFAULT 0,
+                        timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    )
+                ''')
             
             logger.info("Risk management database initialized")
             
@@ -450,18 +514,34 @@ class RiskManagementSystem:
             return False
     
     async def save_position(self, position: Position):
-        """Save position to database"""
+        """Save position to database (MySQL migration)"""
         try:
-            conn = sqlite3.connect(self.db_path)
-            cursor = conn.cursor()
+            if db_manager.backend == 'mysql':
+                query = '''
+                    INSERT INTO positions 
+                    (position_id, symbol, side, entry_price, quantity, remaining_quantity,
+                     entry_time, tp_levels, tp_quantities, current_tp_level, initial_sl, 
+                     current_sl, realized_pnl, unrealized_pnl, confidence, is_active)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    ON DUPLICATE KEY UPDATE
+                    symbol=VALUES(symbol), side=VALUES(side), entry_price=VALUES(entry_price),
+                    quantity=VALUES(quantity), remaining_quantity=VALUES(remaining_quantity),
+                    entry_time=VALUES(entry_time), tp_levels=VALUES(tp_levels), 
+                    tp_quantities=VALUES(tp_quantities), current_tp_level=VALUES(current_tp_level),
+                    initial_sl=VALUES(initial_sl), current_sl=VALUES(current_sl),
+                    realized_pnl=VALUES(realized_pnl), unrealized_pnl=VALUES(unrealized_pnl),
+                    confidence=VALUES(confidence), is_active=VALUES(is_active)
+                '''
+            else:
+                query = '''
+                    INSERT OR REPLACE INTO positions 
+                    (position_id, symbol, side, entry_price, quantity, remaining_quantity,
+                     entry_time, tp_levels, tp_quantities, current_tp_level, initial_sl, 
+                     current_sl, realized_pnl, unrealized_pnl, confidence, is_active)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                '''
             
-            cursor.execute('''
-                INSERT OR REPLACE INTO positions 
-                (position_id, symbol, side, entry_price, quantity, remaining_quantity,
-                 entry_time, tp_levels, tp_quantities, current_tp_level, initial_sl, 
-                 current_sl, realized_pnl, unrealized_pnl, confidence, is_active)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ''', (
+            db_manager.execute(query, (
                 position.position_id, position.symbol, position.side, position.entry_price,
                 position.quantity, position.remaining_quantity, position.entry_time,
                 json.dumps(position.tp_levels), json.dumps(position.tp_quantities),
@@ -469,20 +549,18 @@ class RiskManagementSystem:
                 position.realized_pnl, position.unrealized_pnl, position.confidence, position.is_active
             ))
             
-            conn.commit()
-            conn.close()
-            
         except Exception as e:
             logger.error(f"Failed to save position: {e}")
     
     async def load_positions(self):
-        """Load positions from database"""
+        """Load positions from database (MySQL migration)"""
         try:
-            conn = sqlite3.connect(self.db_path)
-            cursor = conn.cursor()
+            if db_manager.backend == 'mysql':
+                query = 'SELECT * FROM positions WHERE is_active = TRUE'
+            else:
+                query = 'SELECT * FROM positions WHERE is_active = TRUE'
             
-            cursor.execute('SELECT * FROM positions WHERE is_active = TRUE')
-            rows = cursor.fetchall()
+            rows = db_manager.fetchall(query)
             
             for row in rows:
                 position = Position(
@@ -492,7 +570,7 @@ class RiskManagementSystem:
                     entry_price=row[3],
                     quantity=row[4],
                     remaining_quantity=row[5],
-                    entry_time=datetime.fromisoformat(row[6]),
+                    entry_time=datetime.fromisoformat(row[6]) if isinstance(row[6], str) else row[6],
                     tp_levels=json.loads(row[7]) if row[7] else [],
                     tp_quantities=json.loads(row[8]) if row[8] else [],
                     current_tp_level=row[9],
@@ -506,7 +584,6 @@ class RiskManagementSystem:
                 
                 self.positions[position.position_id] = position
             
-            conn.close()
             logger.info(f"Loaded {len(self.positions)} active positions")
             
         except Exception as e:
@@ -514,25 +591,28 @@ class RiskManagementSystem:
     
     async def record_trade(self, position_id: str, symbol: str, side: str, action: str, 
                           price: float, quantity: float, pnl: float):
-        """Record trade in database"""
+        """Record trade in database (MySQL migration)"""
         try:
-            conn = sqlite3.connect(self.db_path)
-            cursor = conn.cursor()
+            if db_manager.backend == 'mysql':
+                query = '''
+                    INSERT INTO trade_history 
+                    (position_id, symbol, side, action, price, quantity, pnl)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s)
+                '''
+            else:
+                query = '''
+                    INSERT INTO trade_history 
+                    (position_id, symbol, side, action, price, quantity, pnl)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                '''
             
-            cursor.execute('''
-                INSERT INTO trade_history 
-                (position_id, symbol, side, action, price, quantity, pnl)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-            ''', (position_id, symbol, side, action, price, quantity, pnl))
-            
-            conn.commit()
-            conn.close()
+            db_manager.execute(query, (position_id, symbol, side, action, price, quantity, pnl))
             
         except Exception as e:
             logger.error(f"Failed to record trade: {e}")
     
     async def update_daily_pnl(self):
-        """Update daily P&L tracking"""
+        """Update daily P&L tracking (MySQL migration)"""
         try:
             today = datetime.now().date().isoformat()
             
@@ -540,27 +620,36 @@ class RiskManagementSystem:
             total_unrealized = sum(p.unrealized_pnl for p in self.positions.values() if p.is_active)
             
             # Calculate daily realized P&L
-            conn = sqlite3.connect(self.db_path)
-            cursor = conn.cursor()
+            if db_manager.backend == 'mysql':
+                query = '''
+                    SELECT SUM(pnl) FROM trade_history 
+                    WHERE DATE(timestamp) = %s
+                '''
+                insert_query = '''
+                    INSERT INTO pnl_history 
+                    (date, realized_pnl, unrealized_pnl, total_pnl, portfolio_balance)
+                    VALUES (%s, %s, %s, %s, %s)
+                    ON DUPLICATE KEY UPDATE
+                    realized_pnl=VALUES(realized_pnl), unrealized_pnl=VALUES(unrealized_pnl),
+                    total_pnl=VALUES(total_pnl), portfolio_balance=VALUES(portfolio_balance)
+                '''
+            else:
+                query = '''
+                    SELECT SUM(pnl) FROM trade_history 
+                    WHERE DATE(timestamp) = ?
+                '''
+                insert_query = '''
+                    INSERT OR REPLACE INTO pnl_history 
+                    (date, realized_pnl, unrealized_pnl, total_pnl, portfolio_balance)
+                    VALUES (?, ?, ?, ?, ?)
+                '''
             
-            cursor.execute('''
-                SELECT SUM(pnl) FROM trade_history 
-                WHERE DATE(timestamp) = ?
-            ''', (today,))
-            
-            result = cursor.fetchone()
-            daily_realized = result[0] if result[0] else 0.0
+            result = db_manager.fetchone(query, (today,))
+            daily_realized = result[0] if result and result[0] else 0.0
             
             # Store daily P&L
-            cursor.execute('''
-                INSERT OR REPLACE INTO pnl_history 
-                (date, realized_pnl, unrealized_pnl, total_pnl, portfolio_balance)
-                VALUES (?, ?, ?, ?, ?)
-            ''', (today, daily_realized, total_unrealized, 
-                  daily_realized + total_unrealized, self.portfolio_balance))
-            
-            conn.commit()
-            conn.close()
+            db_manager.execute(insert_query, (today, daily_realized, total_unrealized, 
+                              daily_realized + total_unrealized, self.portfolio_balance))
             
             self.daily_pnl[today] = {
                 'realized': daily_realized,
@@ -582,34 +671,37 @@ class RiskManagementSystem:
         asyncio.create_task(self.save_tp_sl_config(config))
     
     async def save_tp_sl_config(self, config: TPSLConfig):
-        """Save TP/SL configuration to database"""
+        """Save TP/SL configuration to database (MySQL migration)"""
         try:
-            conn = sqlite3.connect(self.db_path)
-            cursor = conn.cursor()
+            if db_manager.backend == 'mysql':
+                query = '''
+                    INSERT INTO tp_sl_configs 
+                    (symbol, tp_levels, sl_percentage, trailing_step, max_positions)
+                    VALUES (%s, %s, %s, %s, %s)
+                    ON DUPLICATE KEY UPDATE
+                    tp_levels=VALUES(tp_levels), sl_percentage=VALUES(sl_percentage),
+                    trailing_step=VALUES(trailing_step), max_positions=VALUES(max_positions),
+                    updated_at=CURRENT_TIMESTAMP
+                '''
+            else:
+                query = '''
+                    INSERT OR REPLACE INTO tp_sl_configs 
+                    (symbol, tp_levels, sl_percentage, trailing_step, max_positions)
+                    VALUES (?, ?, ?, ?, ?)
+                '''
             
-            cursor.execute('''
-                INSERT OR REPLACE INTO tp_sl_configs 
-                (symbol, tp_levels, sl_percentage, trailing_step, max_positions)
-                VALUES (?, ?, ?, ?, ?)
-            ''', (
+            db_manager.execute(query, (
                 config.symbol, json.dumps(config.tp_levels), 
                 config.sl_percentage, config.trailing_step, config.max_positions
             ))
-            
-            conn.commit()
-            conn.close()
             
         except Exception as e:
             logger.error(f"Failed to save TP/SL config: {e}")
     
     async def load_tp_sl_configs(self):
-        """Load TP/SL configurations from database"""
+        """Load TP/SL configurations from database (MySQL migration)"""
         try:
-            conn = sqlite3.connect(self.db_path)
-            cursor = conn.cursor()
-            
-            cursor.execute('SELECT * FROM tp_sl_configs')
-            rows = cursor.fetchall()
+            rows = db_manager.fetchall('SELECT * FROM tp_sl_configs')
             
             for row in rows:
                 config = TPSLConfig(
@@ -621,8 +713,6 @@ class RiskManagementSystem:
                 )
                 
                 self.tp_sl_configs[config.symbol] = config
-            
-            conn.close()
             
         except Exception as e:
             logger.error(f"Failed to load TP/SL configs: {e}")

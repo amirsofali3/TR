@@ -1,14 +1,16 @@
 """
 CatBoost Machine Learning Model with RFE Feature Selection
+MySQL migration support
 """
 
 import pandas as pd
 import numpy as np
 import joblib
 import os
+import time
 from typing import Dict, List, Optional, Tuple, Any
 from loguru import logger
-from datetime import datetime
+from datetime import datetime, timedelta
 import sqlite3
 
 from catboost import CatBoostClassifier, CatBoostRegressor
@@ -16,6 +18,9 @@ from sklearn.feature_selection import RFE, RFECV
 from sklearn.model_selection import train_test_split, cross_val_score
 from sklearn.preprocessing import LabelEncoder
 from sklearn.metrics import classification_report, accuracy_score, precision_recall_fscore_support
+
+# Import database manager for MySQL migration
+from src.database.db_manager import db_manager
 
 from config.settings import *
 
@@ -34,6 +39,11 @@ class CatBoostTradingModel:
         self.is_trained = False
         self.model_path = "models/"
         self.db_path = DATABASE_URL.replace("sqlite:///", "")
+        
+        # Training control and fallback (MySQL migration)
+        self.last_training_attempt = None
+        self.training_cooldown_until = None
+        self.prediction_warning_counter = 0  # Reduce warning spam
         
         # Initialize feature weights (active=1.0, inactive=0.01)
         self.active_weight = ACTIVE_FEATURE_WEIGHT
@@ -79,8 +89,10 @@ class CatBoostTradingModel:
             raise
     
     async def prepare_features_and_labels(self, data: Dict[str, Any], symbol: str) -> Tuple[pd.DataFrame, pd.Series]:
-        """Prepare features and labels from indicator data"""
+        """Prepare features and labels from indicator data (MySQL migration improved)"""
         try:
+            logger.info("[TRAIN] Preparing features and labels...")
+            
             # Convert indicators to DataFrame
             # Collect valid indicators first to avoid DataFrame fragmentation
             valid_indicators = {}
@@ -88,45 +100,71 @@ class CatBoostTradingModel:
                 if isinstance(values, (pd.Series, list, np.ndarray)):
                     valid_indicators[indicator_name] = values
             
+            if not valid_indicators:
+                logger.error("[TRAIN] No valid indicators found")
+                return pd.DataFrame(), pd.Series()
+            
             # Create DataFrame all at once to avoid fragmentation warning
             feature_df = pd.DataFrame(valid_indicators)
+            raw_feature_count = len(feature_df.columns)
+            raw_sample_count = len(feature_df)
+            
+            logger.info(f"[TRAIN] Raw features: {raw_feature_count}, samples: {raw_sample_count}")
             
             # Remove rows with NaN values
             feature_df = feature_df.dropna()
+            clean_sample_count = len(feature_df)
             
-            if len(feature_df) == 0:
-                logger.warning("No valid feature data after cleaning")
+            if clean_sample_count == 0:
+                logger.warning("[TRAIN] No valid feature data after cleaning")
                 return pd.DataFrame(), pd.Series()
+            
+            logger.info(f"[TRAIN] Samples after dropna: {clean_sample_count} (dropped {raw_sample_count - clean_sample_count})")
             
             # Generate labels based on future price movement
             labels = await self.generate_labels(feature_df, symbol)
             
             # Align features and labels
             min_length = min(len(feature_df), len(labels))
+            if min_length != len(feature_df):
+                logger.info(f"[TRAIN] Aligning data length to {min_length}")
+            
             feature_df = feature_df.iloc[:min_length]
             labels = labels.iloc[:min_length]
             
-            logger.info(f"Prepared {len(feature_df)} samples with {len(feature_df.columns)} features")
+            # Log class distribution (MySQL migration)
+            if len(labels) > 0:
+                class_dist = labels.value_counts().sort_index()
+                logger.info(f"[TRAIN] Class distribution - SELL: {class_dist.get(0, 0)}, HOLD: {class_dist.get(1, 0)}, BUY: {class_dist.get(2, 0)}")
+            
+            logger.info(f"[TRAIN] Final dataset: {len(feature_df)} samples with {len(feature_df.columns)} features")
             
             return feature_df, labels
             
         except Exception as e:
-            logger.error(f"Failed to prepare features and labels: {e}")
+            logger.error(f"[TRAIN] Failed to prepare features and labels: {e}")
             return pd.DataFrame(), pd.Series()
     
     async def generate_labels(self, feature_df: pd.DataFrame, symbol: str) -> pd.Series:
-        """Generate trading labels (BUY=2, HOLD=1, SELL=0) based on future returns"""
+        """Generate trading labels (BUY=2, HOLD=1, SELL=0) based on future returns (MySQL migration)"""
         try:
-            # Get price data from database
-            conn = sqlite3.connect(self.db_path)
+            # Get price data from database using db_manager
+            if db_manager.backend == 'mysql':
+                query = '''
+                    SELECT close, timestamp 
+                    FROM market_data 
+                    WHERE symbol = %s AND timeframe = %s 
+                    ORDER BY timestamp ASC
+                '''
+            else:
+                query = '''
+                    SELECT close, timestamp 
+                    FROM market_data 
+                    WHERE symbol = ? AND timeframe = ? 
+                    ORDER BY timestamp ASC
+                '''
             
-            query = '''
-                SELECT close, timestamp 
-                FROM market_data 
-                WHERE symbol = ? AND timeframe = ? 
-                ORDER BY timestamp ASC
-            '''
-            
+            conn = db_manager.get_pandas_connection()
             price_df = pd.read_sql_query(query, conn, params=(symbol, DEFAULT_TIMEFRAME))
             conn.close()
             
@@ -134,9 +172,20 @@ class CatBoostTradingModel:
                 logger.warning(f"No price data found for {symbol}")
                 return pd.Series([1] * len(feature_df))  # Default to HOLD
             
+            # Align feature_df length to price_df (MySQL migration improvement)
+            if len(price_df) < len(feature_df):
+                logger.warning(f"Price data ({len(price_df)}) shorter than features ({len(feature_df)})")
+                feature_df = feature_df.iloc[:len(price_df)]
+            
             # Calculate future returns (looking ahead 1-3 periods)
             price_df['future_return_1'] = price_df['close'].pct_change(1).shift(-1)
             price_df['future_return_3'] = price_df['close'].pct_change(3).shift(-3)
+            
+            # Guard against empty future returns (MySQL migration improvement)
+            valid_returns = price_df[['future_return_1', 'future_return_3']].dropna()
+            if len(valid_returns) < 10:
+                logger.warning(f"Insufficient future return data ({len(valid_returns)} rows), using HOLD labels")
+                return pd.Series([1] * len(feature_df))
             
             # Define thresholds for buy/sell signals
             buy_threshold = 0.02   # 2% gain
@@ -145,8 +194,8 @@ class CatBoostTradingModel:
             labels = []
             for i in range(len(feature_df)):
                 if i < len(price_df):
-                    ret_1 = price_df['future_return_1'].iloc[i]
-                    ret_3 = price_df['future_return_3'].iloc[i]
+                    ret_1 = price_df['future_return_1'].iloc[i] if not pd.isna(price_df['future_return_1'].iloc[i]) else 0
+                    ret_3 = price_df['future_return_3'].iloc[i] if not pd.isna(price_df['future_return_3'].iloc[i]) else 0
                     
                     # Strong positive signal
                     if ret_1 > buy_threshold or ret_3 > buy_threshold * 1.5:
@@ -166,16 +215,21 @@ class CatBoostTradingModel:
             return pd.Series([1] * len(feature_df))  # Default to HOLD
     
     async def perform_rfe_selection(self, X: pd.DataFrame, y: pd.Series, rfe_eligible_features: List[str]) -> List[str]:
-        """Perform Recursive Feature Elimination on eligible features"""
+        """Perform Recursive Feature Elimination on eligible features (MySQL migration improved)"""
         try:
-            logger.info("Performing RFE feature selection...")
+            logger.info("[TRAIN] Performing RFE feature selection...")
             self.training_progress = 10
+            
+            # Guard: Check minimum samples for RFE (MySQL migration)
+            if len(X) < MIN_RFE_SAMPLES:
+                logger.warning(f"[TRAIN] Insufficient samples for RFE ({len(X)} < {MIN_RFE_SAMPLES}), using baseline feature selection")
+                return await self.select_features_by_importance(X, y, rfe_eligible_features)
             
             # Filter to only RFE-eligible features
             rfe_features = [col for col in X.columns if col in rfe_eligible_features]
             
             if len(rfe_features) == 0:
-                logger.warning("No RFE-eligible features found")
+                logger.warning("[TRAIN] No RFE-eligible features found")
                 return list(X.columns)
             
             X_rfe = X[rfe_features].copy()
@@ -210,8 +264,8 @@ class CatBoostTradingModel:
             required_features = [col for col in X.columns if col not in rfe_features]
             all_selected_features = selected_rfe_features + required_features
             
-            logger.info(f"RFE selected {len(selected_rfe_features)} features out of {len(rfe_features)} eligible")
-            logger.info(f"Total features after adding required: {len(all_selected_features)}")
+            logger.info(f"[TRAIN] RFE selected {len(selected_rfe_features)} features out of {len(rfe_features)} eligible")
+            logger.info(f"[TRAIN] Total features after adding required: {len(all_selected_features)}")
             
             # Store RFE results
             self.rfe_selector = rfe
@@ -221,14 +275,17 @@ class CatBoostTradingModel:
             return all_selected_features
             
         except Exception as e:
-            logger.error(f"RFE selection failed: {e}")
+            logger.error(f"[TRAIN] RFE selection failed: {e}")
             # Fallback: select top features by importance
             return await self.select_features_by_importance(X, y, rfe_eligible_features)
     
     async def select_features_by_importance(self, X: pd.DataFrame, y: pd.Series, rfe_eligible_features: List[str]) -> List[str]:
-        """Fallback feature selection based on feature importance"""
+        """Fallback feature selection based on feature importance (MySQL migration improved)"""
         try:
-            logger.info("Using feature importance for selection...")
+            logger.info("[TRAIN] Using feature importance for selection...")
+            
+            # Cap features to MAX_BASELINE_FEATURES when RFE is skipped (MySQL migration)
+            max_features = min(MAX_BASELINE_FEATURES, len(rfe_eligible_features))
             
             # Train a quick model to get feature importance
             temp_model = CatBoostClassifier(
@@ -247,21 +304,21 @@ class CatBoostTradingModel:
                 'importance': temp_model.get_feature_importance()
             }).sort_values('importance', ascending=False)
             
-            # Select top RFE-eligible features
+            # Select top features (use variance proxy if many features) (MySQL migration)
             rfe_features = importance_df[
                 importance_df['feature'].isin(rfe_eligible_features)
-            ].head(RFE_N_FEATURES)['feature'].tolist()
+            ].head(max_features)['feature'].tolist()
             
             # Add required features
             required_features = [col for col in X.columns if col not in rfe_eligible_features]
             all_selected_features = rfe_features + required_features
             
-            logger.info(f"Selected {len(rfe_features)} top important features")
+            logger.info(f"[TRAIN] Selected {len(rfe_features)} top important features (max {max_features})")
             
             return all_selected_features
             
         except Exception as e:
-            logger.error(f"Feature importance selection failed: {e}")
+            logger.error(f"[TRAIN] Feature importance selection failed: {e}")
             return list(X.columns)  # Return all features as fallback
     
     def setup_feature_weights(self, selected_features: List[str], all_features: List[str]):
@@ -368,7 +425,11 @@ class CatBoostTradingModel:
         """Make predictions with confidence scores"""
         try:
             if not self.is_trained or self.model is None:
-                logger.warning("Model is not trained")
+                # Reduce warning spam by logging warning only every N predictions (MySQL migration)
+                self.prediction_warning_counter += 1
+                if self.prediction_warning_counter % 10 == 1:  # Log every 10th warning
+                    logger.warning(f"Model is not trained (warning #{self.prediction_warning_counter})")
+                
                 return {
                     'prediction': 'HOLD',
                     'confidence': 0.0,
@@ -381,8 +442,23 @@ class CatBoostTradingModel:
             # Select only trained features
             if self.selected_features:
                 available_features = [f for f in self.selected_features if f in X_processed.columns]
+                
+                # Log once if missing > 20% of expected features (MySQL migration)
+                missing_pct = (len(self.selected_features) - len(available_features)) / len(self.selected_features)
+                if missing_pct > 0.2:
+                    if not hasattr(self, '_missing_features_warned'):
+                        logger.warning(f"Missing {missing_pct:.1%} of expected features ({len(self.selected_features) - len(available_features)}/{len(self.selected_features)})")
+                        self._missing_features_warned = True
+                
                 if available_features:
                     X_processed = X_processed[available_features]
+                else:
+                    logger.warning("No trained features available")
+                    return {
+                        'prediction': 'HOLD',
+                        'confidence': 0.0,
+                        'probabilities': {'SELL': 0.33, 'HOLD': 0.34, 'BUY': 0.33}
+                    }
             
             # Make prediction
             prediction_proba = self.model.predict_proba(X_processed)
@@ -531,7 +607,7 @@ class CatBoostTradingModel:
             logger.warning(f"Failed to load existing model: {e}")
     
     def get_model_info(self) -> Dict[str, Any]:
-        """Get model information for web interface"""
+        """Get model information for web interface (MySQL migration enhanced)"""
         return {
             'is_trained': self.is_trained,
             'training_progress': self.training_progress,
@@ -540,5 +616,15 @@ class CatBoostTradingModel:
             'total_features_count': len(self.feature_weights),
             'active_features': [f for f, w in self.feature_weights.items() if w == self.active_weight],
             'inactive_features': [f for f, w in self.feature_weights.items() if w == self.inactive_weight],
-            'feature_importance': self.feature_importance
+            'feature_importance': self.feature_importance,
+            # MySQL migration enhancements
+            'fallback_active': not self.is_trained,
+            'last_training_time': self.model_performance.get('training_date', None),
+            'samples_in_last_train': self.model_performance.get('training_samples', 0),
+            'class_distribution': self.model_performance.get('class_distribution', {}),
+            'training_cooldown_active': (
+                self.training_cooldown_until and 
+                datetime.now() < self.training_cooldown_until
+            ) if hasattr(self, 'training_cooldown_until') and self.training_cooldown_until else False,
+            'prediction_warning_count': getattr(self, 'prediction_warning_counter', 0)
         }
