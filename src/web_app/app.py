@@ -316,6 +316,31 @@ def create_app(data_collector=None, indicator_engine=None, ml_model=None, tradin
             logger.error(f"Features API error: {e}")
             return jsonify({'error': str(e)}), 500
 
+    @app.route('/api/bootstrap_progress')
+    def get_bootstrap_progress():
+        """Get bootstrap collection progress"""
+        try:
+            if not app.data_collector:
+                return jsonify({'error': 'Data collector not initialized'}), 500
+            
+            status = app.data_collector.get_bootstrap_status()
+            
+            # Transform to match expected format
+            progress_data = {
+                'active': status.get('enabled', False),
+                'progress': status.get('percent', 0.0),
+                'elapsed_sec': status.get('elapsed_sec', 0),
+                'remaining_sec': status.get('remaining_sec', 0),
+                'total_records': status.get('records_total', 0),
+                'per_symbol': status.get('records_per_symbol', {})
+            }
+            
+            return jsonify(progress_data)
+            
+        except Exception as e:
+            logger.error(f"Bootstrap progress API error: {e}")
+            return jsonify({'error': str(e)}), 500
+
     @app.route('/api/analysis/interval', methods=['POST'])
     def change_analysis_interval():
         """Change analysis interval dynamically (User Feedback Adjustments)"""

@@ -4,6 +4,7 @@ Binance Data Collector for fetching cryptocurrency market data
 
 import asyncio
 import aiohttp
+import os
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
@@ -39,6 +40,12 @@ class BinanceDataCollector:
         self.bootstrap_progress = 0.0
         self.bootstrap_records_collected = {}
         self.bootstrap_total_records = 0
+        
+        # Diagnostics and failure tracking
+        self.tick_store_failures = 0
+        self.tick_store_successes = 0
+        self.last_progress_emit = 0
+        self.zero_records_warning_sent = False
         
     async def initialize(self):
         """Initialize the data collector"""
@@ -491,12 +498,24 @@ class BinanceDataCollector:
                 if sleep_time > 0:
                     await asyncio.sleep(sleep_time)
                 
-                # Log progress every 60 seconds
+                # Log progress every 60 seconds and emit WebSocket events every 5 seconds
+                current_time = time.time()
                 if int(elapsed) % 60 == 0 and int(elapsed) > 0:
                     remaining = max(0, self.bootstrap_duration - elapsed)
                     logger.info(f"[COLLECT] Progress: {self.bootstrap_progress:.1f}% | "
                               f"Elapsed: {int(elapsed)}s | Remaining: {int(remaining)}s | "
                               f"Total records: {self.bootstrap_total_records}")
+                
+                # Emit WebSocket progress event every 5 seconds
+                if current_time - self.last_progress_emit >= 5.0:
+                    self.last_progress_emit = current_time
+                    await self._emit_progress_event()
+                
+                # Check for zero records warning after 120 seconds
+                if elapsed >= 120 and self.bootstrap_total_records == 0 and not self.zero_records_warning_sent:
+                    logger.error("[COLLECT] No records collected after 120 seconds - potential data collection failure")
+                    await self._emit_collection_warning("No records collected after 120 seconds")
+                    self.zero_records_warning_sent = True
             
             logger.success(f"[COLLECT] Collection loop completed")
             return True
@@ -528,10 +547,6 @@ class BinanceDataCollector:
             timestamp = int(time.time() * 1000)  # Milliseconds
             await self._store_tick_data(symbol, timestamp, price, 1.0)  # Volume = 1 for simplicity
             
-            # Update counters
-            self.bootstrap_records_collected[symbol] += 1
-            self.bootstrap_total_records += 1
-            
         except Exception as e:
             logger.debug(f"[COLLECT] Failed to collect tick for {symbol}: {e}")
     
@@ -547,17 +562,36 @@ class BinanceDataCollector:
                     VALUES (%s, %s, %s, %s)
                 '''
                 db_manager.execute(insert_query, (symbol, timestamp, price, volume))
-                logger.debug(f"[COLLECT] Stored tick for {symbol}: price={price}, timestamp={timestamp}")
             else:
                 insert_query = f'''
                     INSERT INTO {ticks_table} (symbol, timestamp, price, volume)
                     VALUES (?, ?, ?, ?)
                 '''
                 db_manager.execute(insert_query, (symbol, timestamp, price, volume))
+            
+            # Success tracking
+            self.tick_store_failures = 0  # Reset failure counter on success
+            self.tick_store_successes += 1
+            self.bootstrap_total_records += 1
+            
+            # Increment per-symbol counter
+            if symbol in self.bootstrap_records_collected:
+                self.bootstrap_records_collected[symbol] += 1
+            
+            # Log first 50 successes
+            if self.tick_store_successes <= 50:
                 logger.debug(f"[COLLECT] Stored tick for {symbol}: price={price}, timestamp={timestamp}")
-                
+                if self.tick_store_successes == 50:
+                    logger.info("[COLLECT] First 50 ticks stored successfully")
+            
         except Exception as e:
-            logger.error(f"[COLLECT] Failed to store tick data for {symbol}: {e}")
+            # Failure tracking and escalated logging
+            self.tick_store_failures += 1
+            
+            if self.tick_store_failures <= 5:
+                logger.warning(f"[COLLECT] Failed to store tick data for {symbol}: {e}")
+            else:
+                logger.error(f"[COLLECT] Failed to store tick data for {symbol} (failure #{self.tick_store_failures}): {e}")
     
     async def _aggregate_bootstrap_data(self):
         """Aggregate collected tick data to 1-minute OHLC"""
@@ -649,6 +683,35 @@ class BinanceDataCollector:
             
         except Exception as e:
             logger.error(f"[COLLECT] Failed to aggregate data for {symbol}: {e}")
+    
+    async def _emit_progress_event(self):
+        """Emit WebSocket progress event"""
+        try:
+            # Try to import and emit via Flask app context if available
+            from flask import current_app
+            if hasattr(current_app, 'extensions') and 'socketio' in current_app.extensions:
+                socketio = current_app.extensions['socketio']
+                progress_data = {
+                    'active': self.bootstrap_active,
+                    'progress': self.bootstrap_progress,
+                    'elapsed_sec': int((datetime.now() - self.bootstrap_start_time).total_seconds()) if self.bootstrap_start_time else 0,
+                    'remaining_sec': max(0, self.bootstrap_duration - int((datetime.now() - self.bootstrap_start_time).total_seconds())) if self.bootstrap_start_time else 0,
+                    'total_records': self.bootstrap_total_records,
+                    'per_symbol': dict(self.bootstrap_records_collected)
+                }
+                socketio.emit('collection_progress', progress_data)
+        except Exception as e:
+            logger.debug(f"[COLLECT] Failed to emit progress event: {e}")
+    
+    async def _emit_collection_warning(self, message: str):
+        """Emit WebSocket warning event"""
+        try:
+            from flask import current_app
+            if hasattr(current_app, 'extensions') and 'socketio' in current_app.extensions:
+                socketio = current_app.extensions['socketio']
+                socketio.emit('collection_warning', {'message': message})
+        except Exception as e:
+            logger.debug(f"[COLLECT] Failed to emit warning event: {e}")
     
     def get_bootstrap_status(self) -> Dict:
         """Get bootstrap collection status"""

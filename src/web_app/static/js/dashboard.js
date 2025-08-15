@@ -5,6 +5,7 @@ class TradingDashboard {
         this.socket = null;
         this.lastUpdate = null;
         this.isConnected = false;
+        this.lastBootstrapUpdate = 0;  // Track last bootstrap progress update
         
         this.init();
     }
@@ -55,6 +56,10 @@ class TradingDashboard {
             this.socket.on('analysis_interval_changed', (data) => {
                 this.handleIntervalChange(data);
                 this.showAlert(`Analysis interval changed to ${data.new_interval_sec}s`, 'info');
+            });
+            
+            this.socket.on('collection_warning', (data) => {
+                this.showAlert(`Data Collection Warning: ${data.message}`, 'warning');
             });
             
             this.socket.on('error', (error) => {
@@ -122,6 +127,11 @@ class TradingDashboard {
         setInterval(() => {
             this.loadPortfolio();
         }, 60000);
+        
+        // Bootstrap progress polling fallback every 5 seconds
+        setInterval(() => {
+            this.pollBootstrapProgress();
+        }, 5000);
     }
     
     async loadInitialData() {
@@ -693,6 +703,7 @@ class TradingDashboard {
     }
     
     updateCollectionProgress(data) {
+        // Legacy progress section (if exists)
         const progressSection = document.getElementById('collection-progress-section');
         const progressBar = document.getElementById('collection-progress-bar');
         const statusSpan = document.getElementById('collection-status');
@@ -700,28 +711,71 @@ class TradingDashboard {
         const elapsedSpan = document.getElementById('collection-elapsed');
         const remainingSpan = document.getElementById('collection-remaining');
         
-        if (!data || !data.enabled) {
-            // Hide progress section if collection is not active
+        // New bootstrap progress card
+        const bootstrapCard = document.getElementById('bootstrap-progress-card');
+        const bootstrapProgressBar = document.getElementById('bootstrap-progress-bar');
+        const bootstrapProgressText = document.getElementById('bootstrap-progress-text');
+        const bootstrapTotalRecords = document.getElementById('bootstrap-total-records');
+        const bootstrapElapsed = document.getElementById('bootstrap-elapsed');
+        const bootstrapRemaining = document.getElementById('bootstrap-remaining');
+        const bootstrapSymbolBreakdown = document.getElementById('bootstrap-symbol-breakdown');
+        
+        // Update last socket activity
+        this.lastBootstrapUpdate = Date.now();
+        
+        if (!data || !data.active) {
+            // Hide progress sections if collection is not active
             if (progressSection) progressSection.style.display = 'none';
+            if (bootstrapCard) bootstrapCard.style.display = 'none';
             return;
         }
         
-        // Show progress section
+        // Show bootstrap progress card
+        if (bootstrapCard) bootstrapCard.style.display = 'block';
+        
+        // Update bootstrap progress bar
+        if (bootstrapProgressBar) {
+            const percent = Math.min(data.progress || 0, 100);
+            bootstrapProgressBar.style.width = `${percent}%`;
+            bootstrapProgressBar.textContent = `${percent.toFixed(1)}%`;
+            bootstrapProgressBar.setAttribute('aria-valuenow', percent);
+        }
+        
+        // Update bootstrap progress text
+        if (bootstrapProgressText) {
+            const status = data.progress < 100 ? 'Collecting data...' : 'Collection completed';
+            bootstrapProgressText.textContent = status;
+        }
+        
+        // Update bootstrap record counts
+        if (bootstrapTotalRecords) bootstrapTotalRecords.textContent = data.total_records || 0;
+        if (bootstrapElapsed) bootstrapElapsed.textContent = `${data.elapsed_sec || 0}s`;
+        if (bootstrapRemaining) bootstrapRemaining.textContent = `${data.remaining_sec || 0}s`;
+        
+        // Update symbol breakdown
+        if (bootstrapSymbolBreakdown && data.per_symbol) {
+            const breakdown = Object.entries(data.per_symbol)
+                .map(([symbol, count]) => `${symbol}: ${count}`)
+                .join('<br>');
+            bootstrapSymbolBreakdown.innerHTML = breakdown || 'No data yet';
+        }
+        
+        // Legacy support - show legacy progress section if it exists
         if (progressSection) progressSection.style.display = 'block';
         
-        // Update progress bar
+        // Update legacy progress bar
         if (progressBar) {
-            const percent = Math.min(data.percent || 0, 100);
+            const percent = Math.min(data.progress || 0, 100);
             progressBar.style.width = `${percent}%`;
             progressBar.textContent = `${percent.toFixed(1)}%`;
             progressBar.setAttribute('aria-valuenow', percent);
         }
         
-        // Update status information
+        // Update legacy status information
         if (statusSpan) {
-            statusSpan.textContent = data.percent < 100 ? 'Collecting' : 'Completed';
+            statusSpan.textContent = data.progress < 100 ? 'Collecting' : 'Completed';
         }
-        if (recordsSpan) recordsSpan.textContent = data.records_total || 0;
+        if (recordsSpan) recordsSpan.textContent = data.total_records || 0;
         if (elapsedSpan) elapsedSpan.textContent = `${data.elapsed_sec || 0}s`;
         if (remainingSpan) remainingSpan.textContent = `${data.remaining_sec || 0}s`;
     }
@@ -832,6 +886,25 @@ class TradingDashboard {
     showLoading(show) {
         // Could implement a loading overlay here
         console.log(show ? 'Loading...' : 'Loading complete');
+    }
+    
+    async pollBootstrapProgress() {
+        // Only poll if we haven't received a socket update in the last 7 seconds
+        const now = Date.now();
+        if (this.isConnected && (now - this.lastBootstrapUpdate) < 7000) {
+            return; // Skip polling, socket is working
+        }
+        
+        try {
+            const response = await fetch('/api/bootstrap_progress');
+            if (response.ok) {
+                const data = await response.json();
+                // Update the UI using the same method as WebSocket
+                this.updateCollectionProgress(data);
+            }
+        } catch (error) {
+            console.debug('Bootstrap progress polling failed:', error);
+        }
     }
 }
 
