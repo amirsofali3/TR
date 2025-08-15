@@ -71,9 +71,9 @@ class DatabaseManager:
             # Setup MySQL backend (forced)
             self.backend = 'mysql'
             self.mysql_config = {
-                'host': os.getenv('MYSQL_HOST'),
+                'host': os.getenv('MYSQL_HOST', 'localhost'),
                 'port': int(os.getenv('MYSQL_PORT', 3306)),
-                'user': os.getenv('MYSQL_USER'),
+                'user': os.getenv('MYSQL_USER', 'root'),
                 'password': os.getenv('MYSQL_PASSWORD', ''),
                 'database': os.getenv('MYSQL_DB', 'trading_system'),
                 'charset': os.getenv('MYSQL_CHARSET', 'utf8mb4'),
