@@ -42,6 +42,12 @@ MIN_RFE_SAMPLES = 150  # Minimum samples for RFE, otherwise use baseline feature
 MAX_BASELINE_FEATURES = 120  # Max features when RFE is skipped
 TRAIN_RETRY_COOLDOWN_MIN = 10  # Minutes to wait before retrying failed training
 
+# Auto Schema and Database Configuration (Follow-up fixes)
+AUTO_CREATE_SCHEMA = True  # Automatically create database tables if missing
+AUTO_FALLBACK_DB = True  # Fallback to SQLite if MySQL credentials missing
+MYSQL_MARKET_DATA_TABLE = "market_data"  # Configurable market data table name
+TRAIN_RETRY_COOLDOWN_SEC = 600  # Training retry cooldown in seconds (10 min)
+
 # Fallback Strategy Configuration (MySQL migration) 
 ALLOW_FALLBACK_EXECUTION = False  # Allow fallback signals to execute trades
 

@@ -266,6 +266,60 @@ logging.getLogger('src.ml_model.catboost_model').setLevel(logging.DEBUG)
 - [ ] Monitor initial training process
 - [ ] Update any custom scripts to use new database abstraction
 
+## Follow-up Fixes (Latest Updates)
+
+### 🔧 CatBoost Parameter Fix
+- **Fixed**: Resolved CatBoost parameter conflict causing training failures
+- Removed incompatible `subsample` parameter when using Bayesian bootstrap  
+- Added automatic class weight computation for imbalanced datasets
+
+### 🗄️ Auto Schema Creation
+- **New**: Automatic database table creation when database is empty
+- Set `AUTO_CREATE_SCHEMA=true` (default) to enable
+- Configurable table names via `MYSQL_MARKET_DATA_TABLE` environment variable
+- Creates core tables: market_data, real_time_prices, positions
+
+### 🔍 Enhanced MySQL Detection  
+- **Improved**: Robust credential validation with clear error messages
+- Lists missing required variables: MYSQL_HOST, MYSQL_USER, MYSQL_PASSWORD, MYSQL_DB
+- `AUTO_FALLBACK_DB=true` (default) enables automatic SQLite fallback
+- Set `AUTO_FALLBACK_DB=false` to force MySQL-only mode
+
+### 📊 Training Diagnostics & Status
+- **New**: Comprehensive training diagnostics in status endpoint
+- Added fields: `last_training_error`, `class_distribution`, `class_weights`, `sanitization`
+- Feature sanitization metadata tracking (initial/final counts, dropped features)
+- Training retry scheduling with `next_retry_at` timestamp
+
+### 🔄 Retry Logic Improvements
+- **Enhanced**: Configurable retry cooldown via `TRAIN_RETRY_COOLDOWN_SEC` (default: 600s)  
+- Automatic retry scheduling after training failures
+- Clear logging of next retry time and remaining cooldown
+- Retry attempts occur during regular market analysis cycles
+
+### 📈 New Configuration Options
+
+```bash
+# Auto Schema Creation
+export AUTO_CREATE_SCHEMA=true          # Create missing DB tables
+
+# MySQL Fallback Control  
+export AUTO_FALLBACK_DB=true            # Fallback to SQLite if MySQL fails
+
+# Configurable Table Name
+export MYSQL_MARKET_DATA_TABLE=market_data  # Custom market data table name
+
+# Training Retry Settings
+export TRAIN_RETRY_COOLDOWN_SEC=600     # Retry cooldown in seconds (10 min)
+```
+
+### 🧪 Test Coverage
+- **New**: 4 test files with 12+ focused test cases
+- Auto schema creation validation
+- MySQL misconfiguration handling
+- CatBoost parameter conflict prevention  
+- Status diagnostics integrity testing
+
 ## Next Steps
 
 1. **Monitor Performance**: Compare SQLite vs MySQL performance in your environment

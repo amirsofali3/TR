@@ -489,6 +489,84 @@ BACKUP_COUNT = 5                   # Rotating logs
 - Include error handling
 - Write unit tests for new features
 
+## 🔧 Troubleshooting
+
+### Training Issues
+
+**Model Training Fails with "bayesian bootstrap doesn't support 'subsample' option"**
+- **Fixed**: This CatBoost parameter conflict has been resolved
+- The system now uses Bayesian bootstrap without the incompatible subsample parameter
+- Automatic class weights are applied to handle imbalanced data
+
+**Model Never Trains / Always Uses Fallback Signals**
+- Check if sufficient historical data exists (≥ 400 samples required)
+- Verify indicators are calculating correctly with `python diagnose.py`
+- Check system logs for specific error messages in training pipeline
+- Training errors are now captured and displayed in `/api/status` endpoint
+
+**Training Retry Cooldown**
+- After training failure, system waits 10 minutes (600 seconds) before retry
+- Check status endpoint for `next_retry_at` to see when retry will occur
+- Cooldown prevents excessive resource usage and log spam
+
+### Database Issues
+
+**MySQL Connection Failed**
+- Verify all required environment variables: `MYSQL_HOST`, `MYSQL_USER`, `MYSQL_PASSWORD`, `MYSQL_DB`  
+- Check MySQL server is running and accessible
+- System will auto-fallback to SQLite if `AUTO_FALLBACK_DB=true` (default)
+- Clear error messages list missing credentials in logs
+
+**Missing Database Tables**
+- **Fixed**: Auto schema creation now creates missing tables automatically
+- Set `AUTO_CREATE_SCHEMA=false` to disable if needed
+- Supports configurable table names via `MYSQL_MARKET_DATA_TABLE`
+
+### Data Collection Issues
+
+**Insufficient Samples for Training**
+- Minimum 400 samples required for initial training
+- Minimum 150 samples for RFE feature selection
+- System falls back to importance-based selection with max 120 features
+
+**High-Cardinality Features Causing Issues**
+- Feature sanitization now automatically drops problematic columns
+- Constant columns and high-cardinality categoricals removed
+- Sanitization metadata available in status endpoint
+
+### Environment Variables
+
+**New Environment Variables (Optional):**
+```bash
+# Auto Schema Creation (default: true)
+export AUTO_CREATE_SCHEMA=true
+
+# MySQL Fallback (default: true)  
+export AUTO_FALLBACK_DB=true
+
+# Configurable Table Name (default: market_data)
+export MYSQL_MARKET_DATA_TABLE=market_data
+
+# Training Retry Cooldown (default: 600 seconds)
+export TRAIN_RETRY_COOLDOWN_SEC=600
+```
+
+### Debugging
+
+**Enable Detailed Logging:**
+```bash
+export LOG_LEVEL=DEBUG
+```
+
+**Check Status Endpoint:**
+- Visit `http://localhost:5000/api/status` for detailed diagnostics
+- New fields include: `last_training_error`, `class_distribution`, `class_weights`, `sanitization`, `next_retry_at`
+
+**Run System Diagnostics:**
+```bash
+python diagnose.py
+```
+
 ## 📄 License
 
 This project is licensed under the MIT License - see the LICENSE file for details.

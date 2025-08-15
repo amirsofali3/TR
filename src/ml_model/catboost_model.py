@@ -45,6 +45,16 @@ class CatBoostTradingModel:
         self.training_cooldown_until = None
         self.prediction_warning_counter = 0  # Reduce warning spam
         
+        # Training diagnostics and metadata (Follow-up fixes)
+        self.last_training_error = None
+        self.last_training_time = None
+        self.class_distribution = {}
+        self.selected_feature_count = 0
+        self.numeric_feature_count = 0
+        self.last_sanitization_stats = {}
+        self.next_retry_at = None
+        self.class_weights = {}
+        
         # Initialize feature weights (active=1.0, inactive=0.01)
         self.active_weight = ACTIVE_FEATURE_WEIGHT
         self.inactive_weight = INACTIVE_FEATURE_WEIGHT
@@ -58,6 +68,7 @@ class CatBoostTradingModel:
             os.makedirs(self.model_path, exist_ok=True)
             
             # Initialize CatBoost model with high performance settings
+            # Note: Bayesian bootstrap is incompatible with subsample parameter
             self.model = CatBoostClassifier(
                 iterations=CATBOOST_ITERATIONS,
                 depth=CATBOOST_DEPTH,
@@ -68,7 +79,7 @@ class CatBoostTradingModel:
                 logging_level='Silent',
                 bootstrap_type='Bayesian',
                 bagging_temperature=1.0,
-                subsample=0.8,
+                # subsample removed - incompatible with Bayesian bootstrap
                 colsample_bylevel=0.8,
                 reg_lambda=3.0,
                 thread_count=-1,
@@ -88,8 +99,12 @@ class CatBoostTradingModel:
             logger.error(f"Failed to initialize ML model: {e}")
             raise
     
-    def _sanitize_features(self, feature_df: pd.DataFrame) -> pd.DataFrame:
-        """Sanitize features to ensure they are numeric and suitable for CatBoost training"""
+    def _sanitize_features(self, feature_df: pd.DataFrame) -> tuple:
+        """Sanitize features and return both sanitized data and metadata
+        
+        Returns:
+            tuple: (sanitized_dataframe, metadata_dict)
+        """
         try:
             logger.info("[TRAIN] Starting feature sanitization...")
             sanitized_df = feature_df.copy()
@@ -182,12 +197,28 @@ class CatBoostTradingModel:
                 logger.info(f"[TRAIN]   Converted features ({len(converted_features)}): {', '.join(converted_features[:3])}" + 
                           (f" and {len(converted_features)-3} more" if len(converted_features) > 3 else ""))
             
-            return sanitized_df
+            # Create metadata dict
+            metadata = {
+                'initial_feature_count': initial_feature_count,
+                'final_feature_count': final_feature_count,
+                'dropped_constant': len([f for f in dropped_features if 'constant' in str(f)]),
+                'dropped_high_cardinality': len([f for f in dropped_features if 'high-cardinality' in str(f)]),
+                'encoded_categorical': len([f for f in converted_features if 'label_encoded' in f]),
+                'converted_numeric': len([f for f in converted_features if 'to_numeric' in f or 'forced_numeric' in f]),
+                'samples_before': rows_before,
+                'samples_after': rows_after
+            }
+            
+            return sanitized_df, metadata
             
         except Exception as e:
             logger.error(f"[TRAIN] Feature sanitization failed: {e}")
-            # Return original dataframe as fallback, let training fail with better error
-            return feature_df
+            # Return original dataframe as fallback with empty metadata
+            return feature_df, {
+                'initial_feature_count': len(feature_df.columns),
+                'final_feature_count': len(feature_df.columns), 
+                'error': str(e)
+            }
     
     async def prepare_features_and_labels(self, data: Dict[str, Any], symbol: str) -> Tuple[pd.DataFrame, pd.Series]:
         """Prepare features and labels from indicator data (MySQL migration improved)"""
@@ -223,7 +254,8 @@ class CatBoostTradingModel:
             logger.info(f"[TRAIN] Samples after dropna: {clean_sample_count} (dropped {raw_sample_count - clean_sample_count})")
             
             # Robust feature sanitization to handle non-numeric columns
-            feature_df = self._sanitize_features(feature_df)
+            feature_df, sanitization_stats = self._sanitize_features(feature_df)
+            self.last_sanitization_stats = sanitization_stats  # Store for diagnostics
             
             if len(feature_df.columns) == 0:
                 logger.error("[TRAIN] No valid features after sanitization")
@@ -442,17 +474,35 @@ class CatBoostTradingModel:
         logger.info(f"Setup weights: {len(selected_features)} active, {len(all_features) - len(selected_features)} inactive")
     
     async def train_model(self, X: pd.DataFrame, y: pd.Series, rfe_eligible_features: List[str]):
-        """Train the CatBoost model with feature selection"""
+        """Train the CatBoost model with feature selection and class weights"""
         try:
             logger.info("Starting model training...")
             self.training_progress = 0
+            self.last_training_error = None  # Reset error
             
             if len(X) == 0 or len(y) == 0:
-                logger.error("No training data available")
+                error_msg = "No training data available"
+                logger.error(error_msg)
+                self.last_training_error = error_msg
                 return False
             
-            # Encode labels
+            # Encode labels and calculate class distribution
             y_encoded = self.label_encoder.fit_transform(y)
+            
+            # Calculate class distribution for diagnostics
+            unique_classes, class_counts = np.unique(y, return_counts=True)
+            self.class_distribution = dict(zip(unique_classes, class_counts.tolist()))
+            
+            # Calculate class weights (inverse frequency)
+            total_samples = len(y)
+            n_classes = len(unique_classes)
+            self.class_weights = {}
+            for i, class_name in enumerate(unique_classes):
+                class_weight = total_samples / (n_classes * class_counts[i])
+                self.class_weights[class_name] = class_weight
+            
+            logger.info(f"[TRAIN] Class distribution: {self.class_distribution}")
+            logger.info(f"[TRAIN] Class weights: {self.class_weights}")
             
             # Split data
             X_train, X_test, y_train, y_test = train_test_split(
@@ -474,8 +524,15 @@ class CatBoostTradingModel:
             
             self.training_progress = 50
             
-            # Train the main model
+            # Train the main model with class weights
             logger.info("Training main CatBoost model...")
+            
+            # Convert class weights to CatBoost format
+            # CatBoost expects weights as a list indexed by encoded label
+            class_weight_list = []
+            for encoded_label in range(len(unique_classes)):
+                original_label = self.label_encoder.inverse_transform([encoded_label])[0]
+                class_weight_list.append(self.class_weights[original_label])
             
             # Use validation set for early stopping
             X_train_final, X_val, y_train_final, y_val = train_test_split(
@@ -486,7 +543,8 @@ class CatBoostTradingModel:
                 X_train_final, y_train_final,
                 eval_set=(X_val, y_val),
                 verbose=False,
-                plot=False
+                plot=False,
+                class_weights=class_weight_list
             )
             
             self.training_progress = 80
@@ -504,8 +562,15 @@ class CatBoostTradingModel:
                 'training_samples': len(X_train),
                 'test_samples': len(X_test),
                 'selected_features': len(selected_features),
-                'training_date': datetime.now().isoformat()
+                'training_date': datetime.now().isoformat(),
+                'class_distribution': self.class_distribution,
+                'class_weights': self.class_weights
             }
+            
+            # Store additional diagnostics
+            self.selected_feature_count = len(selected_features)
+            self.numeric_feature_count = len(X.columns)
+            self.last_training_time = datetime.now()
             
             # Get feature importance
             feature_names = X_train_selected.columns
@@ -521,11 +586,15 @@ class CatBoostTradingModel:
             self.training_progress = 100
             
             logger.success(f"Model training completed. Accuracy: {accuracy:.4f}, F1: {f1:.4f}")
+            logger.info(f"[TRAIN] Training summary: samples={len(X_train)}, features={len(selected_features)}, " +
+                       f"selected={len(selected_features)}, accuracy={accuracy:.4f}, class_weights={self.class_weights}")
             
             return True
             
         except Exception as e:
-            logger.error(f"Model training failed: {e}")
+            error_msg = f"Model training failed: {e}"
+            logger.error(error_msg)
+            self.last_training_error = error_msg
             self.training_progress = 0
             return False
     
@@ -719,7 +788,7 @@ class CatBoostTradingModel:
             logger.warning(f"Failed to load existing model: {e}")
     
     def get_model_info(self) -> Dict[str, Any]:
-        """Get model information for web interface (MySQL migration enhanced)"""
+        """Get model information for web interface (Enhanced with diagnostics)"""
         return {
             'is_trained': self.is_trained,
             'training_progress': self.training_progress,
@@ -738,5 +807,12 @@ class CatBoostTradingModel:
                 self.training_cooldown_until and 
                 datetime.now() < self.training_cooldown_until
             ) if hasattr(self, 'training_cooldown_until') and self.training_cooldown_until else False,
-            'prediction_warning_count': getattr(self, 'prediction_warning_counter', 0)
+            'prediction_warning_count': getattr(self, 'prediction_warning_counter', 0),
+            # Follow-up fixes: Additional diagnostics
+            'last_training_error': self.last_training_error,
+            'numeric_feature_count': self.numeric_feature_count,
+            'selected_feature_count': self.selected_feature_count,
+            'class_weights': self.class_weights,
+            'sanitization': self.last_sanitization_stats,
+            'next_retry_at': self.next_retry_at.isoformat() if self.next_retry_at else None
         }
