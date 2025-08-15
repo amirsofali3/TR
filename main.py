@@ -9,6 +9,9 @@ import os
 import time
 from concurrent.futures import ThreadPoolExecutor
 
+from dotenv import load_dotenv
+load_dotenv()
+
 # Handle missing loguru gracefully
 try:
     from loguru import logger
