@@ -814,92 +814,106 @@ class TradingEngine:
         self.accumulated_samples += count
     
     async def manual_retrain(self, retrain_type: str = "fast") -> Dict[str, Any]:
-        """Manually trigger a retrain (Complete Pipeline Restructure)"""
+        """Manually trigger a retrain (OHLCV-only mode)"""
         try:
-            # Remove Option B - only fast retrain using existing data
-            if retrain_type == "full":
-                logger.warning("[RETRAIN] Full retrain cycle (re-bootstrap) removed per user feedback")
-                retrain_type = "fast"  # Force to fast mode
+            logger.info(f"[RETRAIN] Starting manual retrain (OHLCV-only mode)")
             
-            # Determine history window based on configuration
-            if RETRAIN_USE_FULL_HISTORY:
-                history_minutes = "full_history"
-                sample_limit = ML_LOOKBACK_PERIODS  # Use existing limit
-            else:
-                history_minutes = RETRAIN_HISTORY_MINUTES
-                # Calculate sample limit based on timeframe (approximate)
-                sample_limit = int(history_minutes * 60 / 240)  # Assuming 4h timeframe = 240 min
-                sample_limit = max(sample_limit, MIN_INITIAL_TRAIN_SAMPLES)  # Ensure minimum
+            # Import candle data manager
+            from src.data_access.candle_data_manager import candle_data_manager
             
-            # Enhanced logging for retrain start
-            logger.info(f"[RETRAIN] mode=fast history_minutes={history_minutes} target_samples={sample_limit}")
+            # Step 1: Fetch latest 1000 candles for RFE
+            logger.info(f"[RETRAIN] Fetching latest {RFE_SELECTION_CANDLES} candles for RFE...")
+            recent_data = await candle_data_manager.get_recent_candles(SUPPORTED_PAIRS, RFE_SELECTION_CANDLES)
             
-            # Fast retrain on existing MySQL data only
-            primary_symbol = 'BTCUSDT'
-            historical_data = await self.data_collector.get_historical_data(
-                primary_symbol, DEFAULT_TIMEFRAME, sample_limit
-            )
+            # Step 2: Load full historical data for final training
+            logger.info("[RETRAIN] Loading full historical data for training...")
+            full_data = await candle_data_manager.get_full_historical_data(SUPPORTED_PAIRS)
             
-            if historical_data is None or len(historical_data) < MIN_VALID_SAMPLES:
-                samples_count = len(historical_data) if historical_data is not None else 0
-                logger.warning(f"[RETRAIN] Insufficient samples: {samples_count} < {MIN_VALID_SAMPLES}")
+            if full_data.empty:
                 return {
                     "success": False,
-                    "message": f"Insufficient data for retrain ({samples_count} samples, minimum {MIN_VALID_SAMPLES})",
+                    "message": "No historical data available for retrain",
+                    "error": "NO_DATA"
+                }
+            
+            # Check minimum data requirements
+            if len(full_data) < MIN_INITIAL_TRAIN_SAMPLES:
+                return {
+                    "success": False,
+                    "message": f"Insufficient data for retrain ({len(full_data)} < {MIN_INITIAL_TRAIN_SAMPLES})",
                     "error": "INSUFFICIENT_DATA",
-                    "samples_found": samples_count,
-                    "samples_required": MIN_VALID_SAMPLES
+                    "samples_found": len(full_data),
+                    "samples_required": MIN_INITIAL_TRAIN_SAMPLES
                 }
             
-            actual_samples = len(historical_data)
-            logger.info(f"[RETRAIN] Using {actual_samples} existing samples from MySQL")
+            # Step 3: Prepare data for indicator calculation
+            prepared_full_data = candle_data_manager.prepare_features_dataframe(full_data)
+            prepared_recent_data = None
             
-            # Calculate indicators
-            indicators = await self.indicator_engine.calculate_all_indicators(
-                historical_data, primary_symbol
-            )
+            if not recent_data.empty:
+                prepared_recent_data = candle_data_manager.prepare_features_dataframe(recent_data)
+                logger.info(f"[RETRAIN] RFE window: {len(prepared_recent_data)} recent candles")
+            else:
+                logger.warning("[RETRAIN] No recent data for RFE, using full dataset")
             
-            if not indicators:
+            # Step 4: Calculate indicators on full dataset
+            logger.info("[RETRAIN] Calculating OHLCV indicators...")
+            indicator_results = await self.indicator_engine.calculate_all_indicators(prepared_full_data)
+            
+            if not indicator_results or 'dataframe' not in indicator_results:
                 return {
                     "success": False,
-                    "message": "No indicators available for retrain",
-                    "error": "NO_INDICATORS"
+                    "message": "Failed to calculate indicators for retrain",
+                    "error": "INDICATOR_CALCULATION_FAILED"
                 }
             
-            # Get RFE eligible features
-            rfe_eligible = self.indicator_engine.get_rfe_eligible_indicators()
+            features_df = indicator_results['dataframe']
+            logger.info(f"[RETRAIN] Calculated indicators: {len(features_df.columns)} features, {len(features_df)} samples")
             
-            # Perform retrain
-            retrain_success = await self.ml_model.retrain_online(indicators, primary_symbol, rfe_eligible)
+            # Step 5: Generate training labels
+            labels = self.generate_training_labels(features_df)
             
-            if retrain_success:
+            # Step 6: Get feature lists
+            must_keep_features = self.indicator_engine.get_must_keep_features()
+            rfe_candidates = self.indicator_engine.get_rfe_candidates()
+            
+            logger.info(f"[RETRAIN] Must keep: {len(must_keep_features)}, RFE candidates: {len(rfe_candidates)}")
+            
+            # Step 7: Run retraining with OHLCV data
+            await self.trigger_ohlcv_training(features_df, labels, prepared_recent_data, must_keep_features, rfe_candidates)
+            
+            if self.ml_model.is_trained:
                 # Reset counters
                 self.accumulated_samples = 0
                 self.last_retrain_time = datetime.now()
                 self._schedule_next_retrain()
                 
-                logger.success(f"[RETRAIN] Completed successfully with {actual_samples} samples")
+                logger.success(f"[RETRAIN] OHLCV-only retrain completed successfully")
                 
                 return {
                     "success": True,
-                    "message": "Manual retrain completed successfully",
+                    "message": "OHLCV-only retrain completed successfully",
                     "model_version": self.ml_model.model_version,
                     "training_count": self.ml_model.training_count,
-                    "samples_used": actual_samples,
-                    "mode": "fast"
+                    "samples_used": len(features_df),
+                    "selected_features": len(self.ml_model.selected_features),
+                    "accuracy": self.ml_model.model_performance.get('accuracy', 0.0),
+                    "mode": "ohlcv_only",
+                    "timeframe": "1m",
+                    "rfe_window_size": len(prepared_recent_data) if prepared_recent_data is not None else "full_dataset"
                 }
             else:
                 return {
                     "success": False,
-                    "message": "Manual retrain failed during training",
+                    "message": "OHLCV-only retrain failed during training",
                     "error": "TRAINING_FAILED"
                 }
                 
         except Exception as e:
-            logger.error(f"[RETRAIN] Manual retrain failed: {e}")
+            logger.error(f"[RETRAIN] OHLCV-only retrain failed: {e}")
             return {
                 "success": False,
-                "message": f"Manual retrain failed: {str(e)}",
+                "message": f"OHLCV-only retrain failed: {str(e)}",
                 "error": "EXCEPTION"
             }
     
@@ -983,6 +997,76 @@ class TradingEngine:
                 'counts': {'selected': 0, 'inactive': 0, 'total': 0}
             }
     
+    def _get_ohlcv_features_info(self) -> Dict[str, Any]:
+        """Get OHLCV-specific features information for status API"""
+        try:
+            model_info = self.ml_model.get_model_info()
+            selected_features = model_info.get('active_features', [])
+            inactive_features = model_info.get('inactive_features', [])
+            
+            # Get must-keep features from indicator engine
+            must_keep_features = self.indicator_engine.get_must_keep_features()
+            rfe_candidates = self.indicator_engine.get_rfe_candidates()
+            
+            # Categorize features
+            base_ohlcv = []
+            must_keep_other = []
+            rfe_selected = []
+            rfe_not_selected = []
+            
+            try:
+                from config.settings import BASE_MUST_KEEP_FEATURES
+                base_features = BASE_MUST_KEEP_FEATURES
+            except ImportError:
+                base_features = ["open", "high", "low", "close", "volume"]
+            
+            for feature in selected_features:
+                if feature in base_features:
+                    base_ohlcv.append(feature)
+                elif feature in must_keep_features:
+                    must_keep_other.append(feature)
+                elif feature in rfe_candidates:
+                    rfe_selected.append(feature)
+            
+            for feature in inactive_features:
+                if feature in rfe_candidates:
+                    rfe_not_selected.append(feature)
+            
+            return {
+                'base_ohlcv': base_ohlcv[:50],  # Core OHLCV features
+                'must_keep_other': must_keep_other[:50],  # Other must-keep features
+                'rfe_selected': rfe_selected[:50],  # RFE-selected features
+                'rfe_not_selected': rfe_not_selected[:50],  # RFE candidates not selected
+                'counts': {
+                    'base_ohlcv': len(base_ohlcv),
+                    'must_keep_other': len(must_keep_other),
+                    'rfe_selected': len(rfe_selected),
+                    'rfe_not_selected': len(rfe_not_selected),
+                    'total_selected': len(selected_features),
+                    'total_candidates': len(rfe_candidates),
+                    'rfe_target': RFE_N_FEATURES
+                },
+                'mode': 'ohlcv_only'
+            }
+        except Exception as e:
+            logger.error(f"Failed to get OHLCV features info: {e}")
+            return {
+                'base_ohlcv': [],
+                'must_keep_other': [],
+                'rfe_selected': [],
+                'rfe_not_selected': [],
+                'counts': {
+                    'base_ohlcv': 0,
+                    'must_keep_other': 0,
+                    'rfe_selected': 0,
+                    'rfe_not_selected': 0,
+                    'total_selected': 0,
+                    'total_candidates': 0,
+                    'rfe_target': RFE_N_FEATURES
+                },
+                'mode': 'ohlcv_only'
+            }
+    
     def _check_insufficient_samples(self) -> bool:
         """Check if there are insufficient samples after sanitization"""
         try:
@@ -1021,7 +1105,7 @@ class TradingEngine:
     # ==================== END USER FEEDBACK ADJUSTMENTS ====================
     
     def get_system_status(self) -> Dict[str, Any]:
-        """Get comprehensive system status for web interface (Complete Pipeline Restructure)"""
+        """Get comprehensive system status for web interface (OHLCV-only mode)"""
         try:
             # Check for pending interval changes
             self._check_pending_interval_change()
@@ -1043,17 +1127,21 @@ class TradingEngine:
                     'data_quality': analysis['data_quality']
                 }
             
-            # Get bootstrap collection status
-            collection_status = self.data_collector.get_bootstrap_status()
-            # Add collection metrics (User Feedback Adjustments)
-            collection_status['collector_active'] = self.collector_active
-            collection_status['ticks_per_sec'] = round(self.ticks_per_sec, 2)
+            # OHLCV-only mode: Skip bootstrap collection status
+            collection_status = {
+                'active': False,
+                'progress_percent': 100.0,  # Always complete in OHLCV-only mode
+                'status': 'completed',
+                'message': 'Bootstrap collection bypassed in OHLCV-only mode',
+                'mode': 'ohlcv_only'
+            }
             
             # Get indicators summary
             indicators_summary = self.indicator_engine.get_indicators_summary()
             
-            # Add separate indicator progress (User Feedback Adjustments)
-            indicator_progress = self._get_indicator_progress()
+            # OHLCV-only mode: Enhanced indicators summary
+            indicators_summary['mode'] = 'ohlcv_only'
+            indicators_summary['csv_source'] = 'ohlcv_only_indicators.csv'
             
             # Get database backend info
             backend_info = {}
@@ -1066,33 +1154,33 @@ class TradingEngine:
             # Get online learning status
             online_learning_status = self.get_online_learning_status()
             
-            # Get feature information (User Feedback Adjustments)
-            features_info = self._get_features_info()
+            # Get feature information (OHLCV-only mode enhanced)
+            features_info = self._get_ohlcv_features_info()
             
             # Check for insufficient samples flag
             insufficient_samples_flag = self._check_insufficient_samples()
             
             return {
-                # Core system status
+                # Core system status (OHLCV-only mode)
                 'system_running': self.running,
                 'demo_mode': DEMO_MODE,
                 'supported_pairs': SUPPORTED_PAIRS,
                 'confidence_threshold': CONFIDENCE_THRESHOLD,
                 'timestamp': datetime.now().isoformat(),
+                'mode': 'ohlcv_only',
+                'timeframe': '1m',
                 
-                # Bootstrap collection status (Complete Pipeline Restructure)
+                # OHLCV-only mode collection status
                 'collection': collection_status,
                 
-                # Analysis configuration (User Feedback Adjustments)
+                # Analysis configuration (1m timeframe)
                 'analysis': {
                     'interval_sec': self.current_analysis_interval,
-                    'raw_collection_interval_sec': RAW_COLLECTION_INTERVAL_SEC
+                    'timeframe': '1m',
+                    'raw_collection_bypassed': True
                 },
                 
-                # Indicator progress (separate from training - User Feedback Adjustments)  
-                'indicator_progress': indicator_progress,
-                
-                # Training status with enhanced fields (Complete Pipeline Restructure + User Feedback)
+                # Training status with OHLCV-only enhancements
                 'training': {
                     'phase': model_info.get('current_training_stage', 'idle'),
                     'progress_percent': model_info.get('training_progress', 0.0),
@@ -1115,16 +1203,20 @@ class TradingEngine:
                     'last_training_time': model_info.get('last_training_time'),
                     'next_retrain_at': online_learning_status.get('next_retrain_time'),
                     'accuracy_window_stats': model_info.get('accuracy_window_stats', {}),
-                    'training_progress_info': model_info.get('training_progress_info', {})
+                    'training_progress_info': model_info.get('training_progress_info', {}),
+                    # OHLCV-only specific fields
+                    'rfe_target_features': RFE_N_FEATURES,
+                    'rfe_window_size': RFE_SELECTION_CANDLES,
+                    'mode': 'ohlcv_only'
                 },
                 
-                # Indicators status (Complete Pipeline Restructure)
+                # Indicators status (OHLCV-only mode)
                 'indicators': indicators_summary,
                 
-                # Database backend info (Complete Pipeline Restructure)
+                # Database backend info
                 'backend': backend_info,
                 
-                # Online learning status
+                # Online learning status  
                 'online_learning': online_learning_status,
                 
                 # Legacy fields for backward compatibility

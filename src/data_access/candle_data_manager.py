@@ -135,14 +135,25 @@ class CandleDataManager:
                               limit: Optional[int] = None, 
                               recent_only: bool = False,
                               recent_count: int = 1000) -> pd.DataFrame:
-        """Load OHLCV candle data for specified symbols"""
+        """Load OHLCV candle data for specified symbols with safeguards"""
         try:
             if symbols is None:
                 symbols = SUPPORTED_PAIRS
             
             logger.info(f"[CANDLES] Loading candle data for symbols: {symbols}")
             
-            # Build query
+            # Safeguard: Check if candles table has any data first
+            total_count_sql = f"SELECT COUNT(*) FROM {self.candles_table}"
+            total_result = db_manager.fetchall(total_count_sql)
+            total_candles = total_result[0][0] if total_result else 0
+            
+            if total_candles == 0:
+                logger.warning(f"[CANDLES] Candles table is empty - no data available")
+                return pd.DataFrame()
+            
+            logger.debug(f"[CANDLES] Total candles in table: {total_candles}")
+            
+            # Build query with safeguards for missing symbols
             symbol_placeholders = ','.join(['%s'] * len(symbols))
             
             if db_manager.backend == 'mysql':
@@ -198,6 +209,17 @@ class CandleDataManager:
             
             if not results:
                 logger.warning(f"[CANDLES] No data found for symbols: {symbols}")
+                
+                # Check if any of the symbols exist in the table
+                symbol_check_sql = f"SELECT DISTINCT symbol FROM {self.candles_table}"
+                available_symbols_result = db_manager.fetchall(symbol_check_sql)
+                available_symbols = [row[0] for row in available_symbols_result] if available_symbols_result else []
+                
+                missing_symbols = [sym for sym in symbols if sym not in available_symbols]
+                if missing_symbols:
+                    logger.warning(f"[CANDLES] Missing symbols in candles table: {missing_symbols}")
+                    logger.info(f"[CANDLES] Available symbols: {available_symbols}")
+                
                 return pd.DataFrame()
             
             # Convert to DataFrame
@@ -205,18 +227,31 @@ class CandleDataManager:
                 'symbol', 'timestamp', 'open', 'high', 'low', 'close', 'volume', 'datetime'
             ])
             
-            # Convert data types
-            df['timestamp'] = pd.to_numeric(df['timestamp'])
-            df['open'] = pd.to_numeric(df['open'])
-            df['high'] = pd.to_numeric(df['high'])
-            df['low'] = pd.to_numeric(df['low'])
-            df['close'] = pd.to_numeric(df['close'])
-            df['volume'] = pd.to_numeric(df['volume'])
-            df['datetime'] = pd.to_datetime(df['datetime'])
+            # Safeguard: Validate data types and handle conversion errors
+            try:
+                df['timestamp'] = pd.to_numeric(df['timestamp'], errors='coerce')
+                df['open'] = pd.to_numeric(df['open'], errors='coerce')
+                df['high'] = pd.to_numeric(df['high'], errors='coerce')
+                df['low'] = pd.to_numeric(df['low'], errors='coerce')
+                df['close'] = pd.to_numeric(df['close'], errors='coerce')
+                df['volume'] = pd.to_numeric(df['volume'], errors='coerce')
+                df['datetime'] = pd.to_datetime(df['datetime'], errors='coerce')
+                
+                # Drop rows with invalid data
+                initial_count = len(df)
+                df = df.dropna(subset=['open', 'high', 'low', 'close', 'volume', 'timestamp'])
+                final_count = len(df)
+                
+                if initial_count != final_count:
+                    logger.warning(f"[CANDLES] Dropped {initial_count - final_count} rows with invalid data")
+                
+            except Exception as e:
+                logger.error(f"[CANDLES] Data type conversion failed: {e}")
+                return pd.DataFrame()
             
-            logger.info(f"[CANDLES] Loaded {len(df)} candles for {len(symbols)} symbols")
+            logger.info(f"[CANDLES] Loaded {len(df)} valid candles for {len(symbols)} symbols")
             
-            # Log per-symbol counts
+            # Log per-symbol counts with warnings
             symbol_counts = df['symbol'].value_counts()
             for symbol in symbols:
                 count = symbol_counts.get(symbol, 0)
@@ -224,6 +259,10 @@ class CandleDataManager:
                     logger.warning(f"[CANDLES] No data found for symbol: {symbol}")
                 else:
                     logger.debug(f"[CANDLES] {symbol}: {count} candles")
+                    
+                    # Safeguard: Check for reasonable data distribution
+                    if count < 100:
+                        logger.warning(f"[CANDLES] Symbol {symbol} has very few candles: {count}")
             
             return df
             
