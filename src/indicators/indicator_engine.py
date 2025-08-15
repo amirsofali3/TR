@@ -65,14 +65,23 @@ class IndicatorEngine:
             raise
     
     async def load_indicators_config(self):
-        """Load indicators configuration from CSV file (Complete Pipeline Restructure)"""
+        """Load indicators configuration from CSV file (OHLCV-only mode)"""
         try:
+            # Import settings to get INDICATOR_CSV_PATH
+            from config.settings import INDICATOR_CSV_PATH
+            
             # Use relative path from project root
             import os
             project_root = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
-            csv_path = os.path.join(project_root, "crypto_trading_feature_encyclopedia.csv")
+            csv_path = os.path.join(project_root, INDICATOR_CSV_PATH)
             
-            logger.info(f"[INDICATORS] Loading encyclopedia from: {csv_path}")
+            logger.info(f"[INDICATORS] Loading OHLCV-only indicators from: {csv_path}")
+            
+            if not os.path.exists(csv_path):
+                logger.warning(f"[INDICATORS] CSV file not found: {csv_path}")
+                logger.info("[INDICATORS] Falling back to default OHLCV indicators")
+                self._setup_default_ohlcv_indicators()
+                return
             
             with open(csv_path, 'r', encoding='utf-8') as file:
                 reader = csv.DictReader(file)
@@ -123,20 +132,20 @@ class IndicatorEngine:
                                     self.prerequisite_map[prereq] = []
                                 self.prerequisite_map[prereq].append(indicator_name)
             
-            logger.success(f"[INDICATORS] Encyclopedia loaded successfully:")
+            logger.success(f"[INDICATORS] OHLCV-only indicators loaded successfully:")
             logger.info(f"[INDICATORS]   - Total defined: {total_indicators}")
             logger.info(f"[INDICATORS]   - Must keep: {must_keep_count}")
             logger.info(f"[INDICATORS]   - RFE eligible: {rfe_eligible_count}")
             logger.info(f"[INDICATORS]   - With prerequisites: {len(self.prerequisite_map)}")
             
         except FileNotFoundError:
-            logger.error(f"[INDICATORS] Encyclopedia CSV file not found at {csv_path}")
-            logger.info("[INDICATORS] Falling back to default indicators configuration")
-            self._setup_default_indicators()
+            logger.error(f"[INDICATORS] OHLCV indicators CSV file not found at {csv_path}")
+            logger.info("[INDICATORS] Falling back to default OHLCV indicators")
+            self._setup_default_ohlcv_indicators()
         except Exception as e:
-            logger.error(f"[INDICATORS] Failed to load encyclopedia: {e}")
-            logger.info("[INDICATORS] Falling back to default indicators configuration")
-            self._setup_default_indicators()
+            logger.error(f"[INDICATORS] Failed to load OHLCV indicators: {e}")
+            logger.info("[INDICATORS] Falling back to default OHLCV indicators")
+            self._setup_default_ohlcv_indicators()
     
     def _setup_default_indicators(self):
         """Setup default indicators when CSV file is not available"""
@@ -166,6 +175,68 @@ class IndicatorEngine:
                 self.rfe_eligible_indicators.add(name)
         
         logger.warning(f"Using default configuration with {len(default_indicators)} indicators")
+    
+    def _setup_default_ohlcv_indicators(self):
+        """Setup default OHLCV-only indicators when CSV file is not available"""
+        # Based on BASE_MUST_KEEP_FEATURES and essential OHLCV prerequisites
+        from config.settings import BASE_MUST_KEEP_FEATURES
+        
+        # Core OHLCV data indicators (always required)
+        default_ohlcv_indicators = {
+            'Timestamp': {'category': 'Core Price Data', 'must_keep': True, 'rfe_eligible': False},
+            'Open': {'category': 'Core Price Data', 'must_keep': True, 'rfe_eligible': False},
+            'High': {'category': 'Core Price Data', 'must_keep': True, 'rfe_eligible': False},
+            'Low': {'category': 'Core Price Data', 'must_keep': True, 'rfe_eligible': False},
+            'Close': {'category': 'Core Price Data', 'must_keep': True, 'rfe_eligible': False},
+            'Volume': {'category': 'Core Price Data', 'must_keep': True, 'rfe_eligible': False},
+            'Symbol': {'category': 'Core Price Data', 'must_keep': True, 'rfe_eligible': False},
+            
+            # Essential OHLCV prerequisites
+            'Prev Close': {'category': 'Prereq', 'must_keep': True, 'rfe_eligible': False},
+            'Prev High': {'category': 'Prereq', 'must_keep': True, 'rfe_eligible': False}, 
+            'Prev Low': {'category': 'Prereq', 'must_keep': True, 'rfe_eligible': False},
+            'Typical Price (TP)': {'category': 'Prereq', 'must_keep': True, 'rfe_eligible': False},
+            'Median Price (MP)': {'category': 'Prereq', 'must_keep': True, 'rfe_eligible': False},
+            'HLC3': {'category': 'Prereq', 'must_keep': True, 'rfe_eligible': False},
+            'OHLC4': {'category': 'Prereq', 'must_keep': True, 'rfe_eligible': False},
+            
+            # Essential RFE-eligible OHLCV-based indicators
+            'Return_1': {'category': 'Price Action', 'must_keep': False, 'rfe_eligible': True},
+            'Return_2': {'category': 'Price Action', 'must_keep': False, 'rfe_eligible': True},
+            'Return_3': {'category': 'Price Action', 'must_keep': False, 'rfe_eligible': True},
+            'Return_5': {'category': 'Price Action', 'must_keep': False, 'rfe_eligible': True},
+            'Return_7': {'category': 'Price Action', 'must_keep': False, 'rfe_eligible': True},
+            'Return_10': {'category': 'Price Action', 'must_keep': False, 'rfe_eligible': True},
+            'Return_14': {'category': 'Price Action', 'must_keep': False, 'rfe_eligible': True},
+            'Return_21': {'category': 'Price Action', 'must_keep': False, 'rfe_eligible': True},
+            'HighLowRange_1': {'category': 'Price Action', 'must_keep': False, 'rfe_eligible': True},
+            'HighLowRange_2': {'category': 'Price Action', 'must_keep': False, 'rfe_eligible': True},
+            'HighLowRange_3': {'category': 'Price Action', 'must_keep': False, 'rfe_eligible': True},
+            'HighLowRange_5': {'category': 'Price Action', 'must_keep': False, 'rfe_eligible': True},
+            'CloseToRange_1': {'category': 'Price Action', 'must_keep': False, 'rfe_eligible': True},
+            'CloseToRange_2': {'category': 'Price Action', 'must_keep': False, 'rfe_eligible': True},
+            'CloseToRange_3': {'category': 'Price Action', 'must_keep': False, 'rfe_eligible': True},
+            'CloseToRange_5': {'category': 'Price Action', 'must_keep': False, 'rfe_eligible': True},
+            'Body': {'category': 'Price Action', 'must_keep': False, 'rfe_eligible': True},
+            'UpperWick': {'category': 'Price Action', 'must_keep': False, 'rfe_eligible': True},
+            'LowerWick': {'category': 'Price Action', 'must_keep': False, 'rfe_eligible': True},
+            'BodyToRange': {'category': 'Price Action', 'must_keep': False, 'rfe_eligible': True},
+            'Volume_SMA_10': {'category': 'Volume', 'must_keep': False, 'rfe_eligible': True},
+            'Volume_SMA_20': {'category': 'Volume', 'must_keep': False, 'rfe_eligible': True}
+        }
+        
+        self.indicators_config = default_ohlcv_indicators
+        self.required_indicators = set()
+        self.rfe_eligible_indicators = set()
+        
+        for name, config in default_ohlcv_indicators.items():
+            if config['must_keep']:
+                self.required_indicators.add(name)
+            if config['rfe_eligible']:
+                self.rfe_eligible_indicators.add(name)
+        
+        logger.info(f"[INDICATORS] Using default OHLCV-only configuration with {len(default_ohlcv_indicators)} indicators")
+        logger.info(f"[INDICATORS] Must keep: {len(self.required_indicators)}, RFE eligible: {len(self.rfe_eligible_indicators)}")
     
     def setup_indicator_functions(self):
         """Setup functions for calculating indicators"""
@@ -494,11 +565,27 @@ class IndicatorEngine:
                         'reason': 'Missing dependencies or insufficient iterations'
                     })
             
-            # Build final feature lists
+            # Build final feature lists (OHLCV-only mode)
             self.must_keep_features = []
             self.rfe_candidates = []
             
+            # Always include BASE_MUST_KEEP_FEATURES first
+            try:
+                from config.settings import BASE_MUST_KEEP_FEATURES
+                for base_feature in BASE_MUST_KEEP_FEATURES:
+                    if base_feature in self.computed_indicators:
+                        self.must_keep_features.append(base_feature)
+            except ImportError:
+                # Fallback base features
+                for base_feature in ["open", "high", "low", "close", "volume"]:
+                    if base_feature in self.computed_indicators:
+                        self.must_keep_features.append(base_feature)
+            
             for feature_name in self.computed_indicators:
+                # Skip if already in must_keep from BASE_MUST_KEEP_FEATURES
+                if feature_name in self.must_keep_features:
+                    continue
+                    
                 # Check if this feature corresponds to a must-keep indicator
                 base_indicator = feature_name.split('_')[0] if '_' in feature_name else feature_name
                 
@@ -506,8 +593,8 @@ class IndicatorEngine:
                     self.must_keep_features.append(feature_name)
                 elif base_indicator in self.rfe_eligible_indicators:
                     self.rfe_candidates.append(feature_name)
-                # Core price data is always must-keep
-                elif feature_name.lower() in ['timestamp', 'open', 'high', 'low', 'close', 'volume', 'symbol']:
+                # Core price data and prerequisites are always must-keep
+                elif feature_name.lower() in ['timestamp', 'symbol', 'prev close', 'prev high', 'prev low', 'typical price (tp)', 'median price (mp)', 'hlc3', 'ohlc4']:
                     self.must_keep_features.append(feature_name)
             
             logger.success(f"[INDICATORS] Calculation completed:")
@@ -572,8 +659,20 @@ class IndicatorEngine:
     # New methods for Complete Pipeline Restructure
     
     def get_must_keep_features(self) -> List[str]:
-        """Get final list of must-keep feature names after calculation"""
-        return self.must_keep_features.copy()
+        """Get final list of must-keep feature names after calculation (OHLCV-only mode)"""
+        # Always include BASE_MUST_KEEP_FEATURES
+        try:
+            from config.settings import BASE_MUST_KEEP_FEATURES
+            must_keep = BASE_MUST_KEEP_FEATURES.copy()
+        except ImportError:
+            must_keep = ["open", "high", "low", "close", "volume"]
+        
+        # Add computed must-keep features, avoiding duplicates
+        for feature in self.must_keep_features:
+            if feature.lower() not in [f.lower() for f in must_keep]:
+                must_keep.append(feature)
+                
+        return must_keep
     
     def get_rfe_candidates(self) -> List[str]:
         """Get final list of RFE candidate feature names after calculation"""

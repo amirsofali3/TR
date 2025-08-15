@@ -75,6 +75,11 @@ class CatBoostTradingModel:
         self.model_version = 1
         self.training_count = 0
         
+        # Model preservation for OHLCV-only mode
+        self.model_prev = None  # Previous model backup
+        self.model_prev_performance = None  # Previous model metrics
+        self.model_prev_features = None  # Previous model selected features
+        
         # Initialize feature weights (active=1.0, inactive=0.01)
         self.active_weight = ACTIVE_FEATURE_WEIGHT
         self.inactive_weight = INACTIVE_FEATURE_WEIGHT
@@ -374,25 +379,47 @@ class CatBoostTradingModel:
             logger.error(f"Failed to generate labels: {e}")
             return pd.Series([1] * len(feature_df))  # Default to HOLD
     
-    async def perform_rfe_selection(self, X: pd.DataFrame, y: pd.Series, rfe_eligible_features: List[str]) -> List[str]:
-        """Perform Recursive Feature Elimination on eligible features (MySQL migration improved)"""
+    async def perform_rfe_selection(self, X: pd.DataFrame, y: pd.Series, rfe_eligible_features: List[str], X_recent: Optional[pd.DataFrame] = None, y_recent: Optional[pd.Series] = None) -> List[str]:
+        """Perform Recursive Feature Elimination on eligible features (OHLCV-only mode with recent window)"""
         try:
-            logger.info("[TRAIN] Performing RFE feature selection...")
+            logger.info("[TRAIN] Performing RFE feature selection (OHLCV-only mode)...")
             self.training_progress = 10
             
-            # Guard: Check minimum samples for RFE (MySQL migration)
-            if len(X) < MIN_RFE_SAMPLES:
-                logger.warning(f"[TRAIN] Insufficient samples for RFE ({len(X)} < {MIN_RFE_SAMPLES}), using baseline feature selection")
+            # Import RFE settings for OHLCV-only mode
+            try:
+                from config.settings import RFE_SELECTION_CANDLES, BASE_MUST_KEEP_FEATURES
+                rfe_window_size = RFE_SELECTION_CANDLES
+                base_must_keep = BASE_MUST_KEEP_FEATURES
+            except ImportError:
+                rfe_window_size = 1000
+                base_must_keep = ["open", "high", "low", "close", "volume"]
+            
+            # Use recent window data if provided, otherwise slice from full dataset
+            if X_recent is not None and y_recent is not None:
+                X_rfe_window = X_recent
+                y_rfe_window = y_recent
+            else:
+                # Use most recent RFE_SELECTION_CANDLES from full dataset
+                window_size = min(rfe_window_size, len(X))
+                X_rfe_window = X.tail(window_size)
+                y_rfe_window = y.tail(window_size)
+            
+            logger.info(f"[TRAIN] RFE window: {len(X_rfe_window)} samples (target: {rfe_window_size})")
+            
+            # Guard: Check minimum samples for RFE
+            if len(X_rfe_window) < MIN_RFE_SAMPLES:
+                logger.warning(f"[TRAIN] Insufficient samples for RFE ({len(X_rfe_window)} < {MIN_RFE_SAMPLES}), using baseline feature selection")
                 return await self.select_features_by_importance(X, y, rfe_eligible_features)
             
-            # Filter to only RFE-eligible features
-            rfe_features = [col for col in X.columns if col in rfe_eligible_features]
+            # Filter to only RFE-eligible features (exclude BASE_MUST_KEEP_FEATURES)
+            rfe_features = [col for col in X_rfe_window.columns if col in rfe_eligible_features and col not in base_must_keep]
             
             if len(rfe_features) == 0:
                 logger.warning("[TRAIN] No RFE-eligible features found")
-                return list(X.columns)
+                must_keep_features = [col for col in X.columns if col not in rfe_eligible_features or col in base_must_keep]
+                return must_keep_features
             
-            X_rfe = X[rfe_features].copy()
+            X_rfe_data = X_rfe_window[rfe_features].copy()
             
             # Use a simpler model for RFE to speed up the process
             estimator = CatBoostClassifier(
@@ -403,36 +430,47 @@ class CatBoostTradingModel:
                 random_seed=42
             )
             
-            # Perform RFE with cross-validation
+            # Perform RFE with cross-validation (target 25 features)
+            target_features = min(RFE_N_FEATURES, len(rfe_features))
             rfe = RFECV(
                 estimator=estimator,
-                step=10,  # Remove 10 features at a time
+                step=max(1, len(rfe_features) // 20),  # Remove features progressively
                 cv=3,     # 3-fold cross-validation
                 scoring='accuracy',
                 n_jobs=-1,
-                min_features_to_select=min(RFE_N_FEATURES, len(rfe_features))
+                min_features_to_select=target_features
             )
             
             self.training_progress = 30
             
-            rfe.fit(X_rfe, y)
+            rfe.fit(X_rfe_data, y_rfe_window)
             
-            # Get selected features
-            selected_rfe_features = X_rfe.columns[rfe.support_].tolist()
+            # Get selected RFE features
+            selected_rfe_features = X_rfe_data.columns[rfe.support_].tolist()
             
-            # Add back required features (must keep)
-            required_features = [col for col in X.columns if col not in rfe_features]
-            all_selected_features = selected_rfe_features + required_features
+            # Add back must-keep features (BASE_MUST_KEEP_FEATURES + other required)
+            must_keep_features = [col for col in X.columns if col not in rfe_eligible_features or col in base_must_keep]
+            all_selected_features = selected_rfe_features + must_keep_features
+            
+            # Remove duplicates while preserving order
+            final_features = []
+            seen = set()
+            for feature in all_selected_features:
+                if feature not in seen and feature in X.columns:
+                    final_features.append(feature)
+                    seen.add(feature)
             
             logger.info(f"[TRAIN] RFE selected {len(selected_rfe_features)} features out of {len(rfe_features)} eligible")
-            logger.info(f"[TRAIN] Total features after adding required: {len(all_selected_features)}")
+            logger.info(f"[TRAIN] Must-keep features: {len(must_keep_features)} (including {len(base_must_keep)} base OHLCV)")
+            logger.info(f"[TRAIN] Final feature count: {len(final_features)} (target: {RFE_N_FEATURES + len(base_must_keep)})")
             
-            # Store RFE results
+            # Store RFE results and selected features
             self.rfe_selector = rfe
+            self.selected_features = final_features
             
             self.training_progress = 40
             
-            return all_selected_features
+            return final_features
             
         except Exception as e:
             logger.error(f"[TRAIN] RFE selection failed: {e}")
@@ -490,13 +528,69 @@ class CatBoostTradingModel:
                 self.feature_weights[feature] = self.active_weight
             else:
                 self.feature_weights[feature] = self.inactive_weight
+    
+    def preserve_current_model(self):
+        """Preserve current model before retraining (OHLCV-only mode)"""
+        try:
+            if self.model is not None and self.is_trained:
+                # Deep copy current model and metadata
+                import copy
+                self.model_prev = copy.deepcopy(self.model)
+                self.model_prev_performance = copy.deepcopy(self.model_performance)
+                self.model_prev_features = copy.deepcopy(self.selected_features)
+                logger.info(f"[TRAIN] Previous model preserved (v{self.model_version}, acc: {self.model_prev_performance.get('accuracy', 0.0):.4f})")
+            else:
+                logger.debug("[TRAIN] No trained model to preserve")
+        except Exception as e:
+            logger.error(f"[TRAIN] Failed to preserve current model: {e}")
+    
+    def revert_to_previous_model(self):
+        """Revert to previous model if new training underperforms (OHLCV-only mode)"""
+        try:
+            if self.model_prev is not None and self.model_prev_performance is not None:
+                self.model = self.model_prev
+                self.model_performance = self.model_prev_performance
+                self.selected_features = self.model_prev_features or []
+                self.is_trained = True
+                
+                prev_accuracy = self.model_prev_performance.get('accuracy', 0.0)
+                logger.warning(f"[TRAIN] Reverted to previous model (acc: {prev_accuracy:.4f})")
+                logger.info(f"[TRAIN] Previous model features count: {len(self.selected_features)}")
+                return True
+            else:
+                logger.error("[TRAIN] No previous model available for reversion")
+                return False
+        except Exception as e:
+            logger.error(f"[TRAIN] Failed to revert to previous model: {e}")
+            return False
+    
+    def should_keep_new_model(self, new_accuracy: float) -> bool:
+        """Determine if new model should be kept based on performance (OHLCV-only mode)"""
+        if self.model_prev_performance is None:
+            # No previous model, keep new one regardless
+            return True
+        
+        prev_accuracy = self.model_prev_performance.get('accuracy', 0.0)
+        
+        # Keep new model if it's better or within reasonable threshold
+        improvement_threshold = 0.01  # Allow small degradation for feature reduction benefits
+        
+        if new_accuracy >= (prev_accuracy - improvement_threshold):
+            logger.info(f"[TRAIN] New model performance acceptable: {new_accuracy:.4f} vs {prev_accuracy:.4f}")
+            return True
+        else:
+            logger.warning(f"[TRAIN] New model underperforms: {new_accuracy:.4f} vs {prev_accuracy:.4f}")
+            return False
         
         logger.info(f"Setup weights: {len(selected_features)} active, {len(all_features) - len(selected_features)} inactive")
     
-    async def train_model(self, X: pd.DataFrame, y: pd.Series, rfe_eligible_features: List[str]):
-        """Train the CatBoost model with staged progress and enhanced diagnostics (Complete Pipeline Restructure)"""
+    async def train_model(self, X: pd.DataFrame, y: pd.Series, rfe_eligible_features: List[str], X_recent: Optional[pd.DataFrame] = None, y_recent: Optional[pd.Series] = None):
+        """Train the CatBoost model with staged progress and model preservation (OHLCV-only mode)"""
         try:
             logger.info("[TRAIN] Starting model training with staged progress...")
+            
+            # Preserve current model before retraining (OHLCV-only mode)
+            self.preserve_current_model()
             
             # Initialize training progress
             self.overall_training_progress = 0.0
@@ -551,7 +645,7 @@ class CatBoostTradingModel:
             logger.info("[TRAIN] Stage 3/6: Feature selection...")
             
             # Perform RFE feature selection with progress tracking
-            selected_features = await self.perform_rfe_selection(X_train, y_train, rfe_eligible_features)
+            selected_features = await self.perform_rfe_selection(X_train, y_train, rfe_eligible_features, X_recent, y_recent)
             self.selected_features = selected_features
             self.selected_feature_count = len(selected_features)
             
@@ -653,6 +747,24 @@ class CatBoostTradingModel:
             
             logger.info(f"[TRAIN] Validation results: Accuracy: {accuracy:.4f}, F1: {f1:.4f}")
             self.overall_training_progress = 95.0
+            
+            # Model preservation decision (OHLCV-only mode)
+            if not self.should_keep_new_model(accuracy):
+                logger.warning("[TRAIN] New model underperforms, reverting to previous model")
+                if self.revert_to_previous_model():
+                    # Update progress and return success with reverted model
+                    self.current_training_stage = 'finalizing'
+                    self.overall_training_progress = 100.0
+                    logger.info(f"[TRAIN] Reverted to previous model (v{self.model_version})")
+                    return True
+                else:
+                    logger.error("[TRAIN] Reversion failed, keeping new model despite poor performance")
+            else:
+                logger.info("[TRAIN] New model performance acceptable, keeping new model")
+                # Clear previous model to save memory
+                self.model_prev = None
+                self.model_prev_performance = None
+                self.model_prev_features = None
             
             # Stage 6: Finalizing (95-100%)
             self.current_training_stage = 'finalizing'

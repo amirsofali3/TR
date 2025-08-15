@@ -65,23 +65,108 @@ class TradingEngine:
             logger.error(f"Failed to initialize trading engine: {e}")
             raise
     
-    async def start_post_bootstrap_training(self):
-        """Start training and online learning after bootstrap collection completes"""
+    async def start_post_bootstrap_training(self, features_df=None, labels=None, recent_data_df=None, must_keep_features=None, rfe_candidates=None):
+        """Start training and online learning (OHLCV-only mode)"""
         try:
-            logger.info("[TRAIN] Starting post-bootstrap training phase...")
+            logger.info("[TRAIN] Starting OHLCV-only training phase...")
             
-            # Trigger initial ML model training
-            await self.trigger_initial_training()
+            # Use provided data if available (OHLCV-only mode)
+            if features_df is not None and labels is not None:
+                logger.info("[TRAIN] Using preloaded OHLCV features and labels")
+                await self.trigger_ohlcv_training(features_df, labels, recent_data_df, must_keep_features, rfe_candidates)
+            else:
+                # Fallback to legacy training method
+                logger.info("[TRAIN] Falling back to legacy training method")
+                await self.trigger_initial_training()
             
             # Start online learning if training was successful
             if self.ml_model.is_trained:
                 await self.start_online_learning()
             
-            logger.success("[TRAIN] Post-bootstrap training phase completed")
+            logger.success("[TRAIN] OHLCV-only training phase completed")
             
         except Exception as e:
-            logger.error(f"[TRAIN] Post-bootstrap training failed: {e}")
+            logger.error(f"[TRAIN] OHLCV-only training failed: {e}")
             raise
+    
+    async def trigger_ohlcv_training(self, features_df, labels, recent_data_df=None, must_keep_features=None, rfe_candidates=None):
+        """Trigger OHLCV-only model training with preloaded data"""
+        try:
+            logger.info("[TRAIN] Starting OHLCV-only model training...")
+            
+            if len(features_df) < MIN_INITIAL_TRAIN_SAMPLES:
+                logger.warning(f"Insufficient data for OHLCV training ({len(features_df)} < {MIN_INITIAL_TRAIN_SAMPLES})")
+                return
+            
+            # Ensure features and labels are aligned
+            min_length = min(len(features_df), len(labels))
+            features_aligned = features_df.iloc[:min_length]
+            labels_aligned = labels.iloc[:min_length]
+            
+            logger.info(f"[TRAIN] Training with {len(features_aligned)} samples, {len(features_aligned.columns)} features")
+            
+            # Train the model with OHLCV data
+            if rfe_candidates is None:
+                rfe_candidates = self.indicator_engine.get_rfe_candidates()
+            
+            # Prepare recent data for RFE if provided
+            recent_features_df = None
+            recent_labels = None
+            if recent_data_df is not None:
+                # Calculate indicators on recent data
+                recent_indicators = await self.indicator_engine.calculate_all_indicators(recent_data_df)
+                if recent_indicators and 'dataframe' in recent_indicators:
+                    recent_features_df = recent_indicators['dataframe']
+                    recent_labels = self.generate_training_labels(recent_features_df)
+                    
+                    # Align recent data
+                    if len(recent_features_df) > 0 and len(recent_labels) > 0:
+                        min_recent_length = min(len(recent_features_df), len(recent_labels))
+                        recent_features_df = recent_features_df.iloc[:min_recent_length]
+                        recent_labels = recent_labels.iloc[:min_recent_length]
+                        
+                        logger.info(f"[TRAIN] Recent data for RFE: {len(recent_features_df)} samples")
+            
+            # Start model training
+            training_success = await self.ml_model.train_model(
+                features_aligned, 
+                labels_aligned, 
+                rfe_candidates,
+                X_recent=recent_features_df,
+                y_recent=recent_labels
+            )
+            
+            if training_success:
+                logger.success("[TRAIN] OHLCV-only model training completed successfully")
+            else:
+                logger.warning("[TRAIN] OHLCV-only model training failed")
+                
+        except Exception as e:
+            logger.error(f"[TRAIN] OHLCV-only training failed: {e}")
+            # Set cooldown for retry
+            self.ml_model.training_cooldown_until = datetime.now() + timedelta(seconds=TRAIN_RETRY_COOLDOWN_SEC)
+            raise
+    
+    def generate_training_labels(self, df):
+        """Generate training labels for recent data (helper method)"""
+        try:
+            if 'close' not in df.columns:
+                return pd.Series(['HOLD'] * len(df), index=df.index)
+            
+            # Calculate future returns
+            future_returns = df['close'].pct_change().shift(-1)
+            
+            # Create labels
+            labels = pd.Series(index=df.index, dtype='object')
+            labels[future_returns > 0.002] = 'BUY'
+            labels[future_returns < -0.002] = 'SELL'
+            labels[labels.isna()] = 'HOLD'
+            
+            return labels[:-1]  # Remove last row
+            
+        except Exception as e:
+            logger.error(f"[TRAIN] Failed to generate labels: {e}")
+            return pd.Series(['HOLD'] * (len(df) - 1), index=df.index[:-1])
     
     async def trigger_initial_training(self):
         """Trigger initial model training if model is not trained and sufficient data available (MySQL migration)"""

@@ -303,51 +303,46 @@ class TradingSystem:
         logger.success("✅ System requirements validation passed")
 
     async def start(self):
-        """Start the trading system with Complete Pipeline Restructure flow"""
+        """Start the trading system with OHLCV-only mode flow (bypass bootstrap)"""
         try:
-            logger.info("🚀 Starting Crypto Trading AI System (Complete Pipeline Restructure)...")
-            logger.info(f"📋 Configuration: {len(SUPPORTED_PAIRS)} pairs, {INITIAL_COLLECTION_DURATION_SEC}s bootstrap, {'DEMO' if DEMO_MODE else 'LIVE'} mode")
+            logger.info("🚀 Starting Crypto Trading AI System (OHLCV-only mode)...")
+            logger.info(f"📋 Configuration: {len(SUPPORTED_PAIRS)} pairs, 1m timeframe, {'DEMO' if DEMO_MODE else 'LIVE'} mode")
             
             # Phase 1: System Requirements & Database Validation
-            logger.info("[BOOTSTRAP] Phase 1: System validation...")
+            logger.info("[STARTUP] Phase 1: System validation...")
             await self.validate_system_requirements()
             
-            # Phase 2: Component Initialization (Web First!)
-            logger.info("[BOOTSTRAP] Phase 2: Component initialization...")
+            # Phase 2: Component Initialization 
+            logger.info("[STARTUP] Phase 2: Component initialization...")
             await self.initialize_components()
             
-            # Phase 3: Start Web Application FIRST
-            logger.info("[BOOTSTRAP] Phase 3: Starting web panel...")
+            # Phase 3: Start Web Application
+            logger.info("[STARTUP] Phase 3: Starting web panel...")
             await self.start_web_app()
             
             # Set running flag for web app
             self.running = True
             
-            logger.success("🌐 Web application started - accessible at http://{WEB_HOST}:{WEB_PORT}")
-            logger.info("[BOOTSTRAP] System ready for bootstrap data collection...")
+            logger.success(f"🌐 Web application started - accessible at http://{WEB_HOST}:{WEB_PORT}")
             
-            # Phase 4: Bootstrap Data Collection
-            logger.info("[BOOTSTRAP] Phase 4: Starting bootstrap data collection...")
-            bootstrap_success = await self.run_bootstrap_collection()
+            # Phase 4: Initialize Candle Data Manager (OHLCV-only mode)
+            logger.info("[STARTUP] Phase 4: Initializing candle data access...")
+            await self.initialize_candle_data_manager()
             
-            if not bootstrap_success:
-                logger.error("[BOOTSTRAP] Bootstrap collection failed - starting with limited functionality")
-                # Continue anyway but with warnings
+            # Phase 5: Load Historical OHLCV Data & Calculate Indicators
+            logger.info("[STARTUP] Phase 5: Loading historical OHLCV data...")
+            await self.load_and_prepare_ohlcv_data()
             
-            # Phase 5: Indicator Preparation (After Collection)
-            logger.info("[BOOTSTRAP] Phase 5: Preparing indicators...")
-            await self.prepare_indicators()
+            # Phase 6: Model Training (OHLCV-only mode with RFE)
+            logger.info("[STARTUP] Phase 6: Starting OHLCV-based model training...")
+            await self.run_ohlcv_model_training()
             
-            # Phase 6: Model Training (After Indicators)
-            logger.info("[BOOTSTRAP] Phase 6: Starting model training...")
-            await self.run_initial_training()
-            
-            # Phase 7: Start Trading & Online Learning
-            logger.info("[BOOTSTRAP] Phase 7: Starting trading operations...")
+            # Phase 7: Start Trading Operations
+            logger.info("[STARTUP] Phase 7: Starting trading operations...")
             await self.start_trading_operations()
             
-            logger.success("🎉 Complete Pipeline Restructure startup completed successfully!")
-            logger.info("[BOOTSTRAP] System fully operational - all phases complete")
+            logger.success("🎉 OHLCV-only mode startup completed successfully!")
+            logger.info("[STARTUP] System fully operational - ready for 1m timeframe trading")
             
             # Start main trading loop
             await self.run_trading_loop()
@@ -355,84 +350,197 @@ class TradingSystem:
         except Exception as e:
             logger.error(f"❌ Failed to start trading system: {e}")
             logger.error("💡 Common solutions:")
-            logger.error("   1. Install missing packages: pip install -r requirements.txt") 
+            logger.error("   1. Ensure candles table has data for symbols: " + ", ".join(SUPPORTED_PAIRS)) 
             logger.error("   2. Check MySQL configuration (MYSQL_HOST, MYSQL_USER, etc.)")
-            logger.error("   3. Ensure FORCE_MYSQL_ONLY=False if MySQL not available")
+            logger.error("   3. Verify ohlcv_only_indicators.csv exists in project root")
             raise
     
-    # ==================== COMPLETE PIPELINE RESTRUCTURE PHASES ====================
+    # ==================== OHLCV-ONLY MODE PHASES ====================
     
-    async def run_bootstrap_collection(self) -> bool:
-        """Run the bootstrap data collection phase"""
+    async def initialize_candle_data_manager(self):
+        """Initialize the candle data manager for OHLCV-only mode"""
         try:
-            logger.info(f"[COLLECT] Starting {INITIAL_COLLECTION_DURATION_SEC}s bootstrap collection...")
+            logger.info("[CANDLES] Initializing candle data manager...")
             
-            # Start bootstrap collection
-            collection_success = await self.data_collector.start_bootstrap_collection(
-                duration=INITIAL_COLLECTION_DURATION_SEC
+            # Import and initialize candle data manager
+            from src.data_access.candle_data_manager import candle_data_manager
+            await candle_data_manager.initialize()
+            
+            # Validate data availability for supported symbols
+            validation_results = await candle_data_manager.validate_data_availability(
+                SUPPORTED_PAIRS, 
+                min_samples=MIN_INITIAL_TRAIN_SAMPLES
             )
             
-            if collection_success:
-                logger.success(f"[COLLECT] Bootstrap collection completed successfully")
-                return True
-            else:
-                logger.warning(f"[COLLECT] Bootstrap collection failed or incomplete")
-                return False
-                
+            available_symbols = [symbol for symbol, valid in validation_results.items() if valid]
+            missing_symbols = [symbol for symbol, valid in validation_results.items() if not valid]
+            
+            if missing_symbols:
+                logger.warning(f"[CANDLES] Symbols with insufficient data: {missing_symbols}")
+            
+            if not available_symbols:
+                raise ValueError("No symbols have sufficient data for training")
+            
+            logger.info(f"[CANDLES] Available symbols for training: {available_symbols}")
+            logger.success("[CANDLES] Candle data manager initialized successfully")
+            
         except Exception as e:
-            logger.error(f"[COLLECT] Bootstrap collection phase failed: {e}")
-            return False
+            logger.error(f"[CANDLES] Failed to initialize candle data manager: {e}")
+            raise
+    
+    async def load_and_prepare_ohlcv_data(self):
+        """Load historical OHLCV data and prepare for indicator calculation"""
+        try:
+            from src.data_access.candle_data_manager import candle_data_manager
+            
+            logger.info("[OHLCV] Loading full historical OHLCV data...")
+            
+            # Load full historical data for all supported pairs
+            full_data = await candle_data_manager.get_full_historical_data(SUPPORTED_PAIRS)
+            
+            if full_data.empty:
+                raise ValueError("No historical OHLCV data available")
+            
+            logger.info(f"[OHLCV] Loaded {len(full_data)} historical candles")
+            
+            # Prepare data for indicator calculation
+            prepared_data = candle_data_manager.prepare_features_dataframe(full_data)
+            
+            if prepared_data.empty:
+                raise ValueError("Failed to prepare OHLCV data for indicators")
+            
+            # Store data for later use
+            self.historical_ohlcv_data = prepared_data
+            
+            logger.success(f"[OHLCV] Historical data prepared: {len(prepared_data)} rows")
+            
+        except Exception as e:
+            logger.error(f"[OHLCV] Failed to load historical data: {e}")
+            raise
+    
+    async def run_ohlcv_model_training(self):
+        """Run OHLCV-based model training with RFE on recent window"""
+        try:
+            logger.info("[TRAIN] Starting OHLCV-based model training...")
+            
+            from src.data_access.candle_data_manager import candle_data_manager
+            
+            # Load recent data for RFE window
+            logger.info(f"[TRAIN] Loading recent {RFE_SELECTION_CANDLES} candles for RFE...")
+            recent_data = await candle_data_manager.get_recent_candles(SUPPORTED_PAIRS, RFE_SELECTION_CANDLES)
+            
+            if recent_data.empty:
+                logger.warning("[TRAIN] No recent data available, using full dataset for RFE")
+                recent_data = None
+            else:
+                recent_data = candle_data_manager.prepare_features_dataframe(recent_data)
+                logger.info(f"[TRAIN] RFE window: {len(recent_data)} recent candles")
+            
+            # Calculate indicators on full historical data
+            logger.info("[TRAIN] Calculating OHLCV-based indicators...")
+            indicator_results = await self.indicator_engine.calculate_all_indicators(
+                self.historical_ohlcv_data
+            )
+            
+            if not indicator_results or 'dataframe' not in indicator_results:
+                raise ValueError("Indicator calculation failed")
+            
+            features_df = indicator_results['dataframe']
+            logger.info(f"[TRAIN] Calculated indicators: {len(features_df.columns)} features, {len(features_df)} samples")
+            
+            # Get feature lists for RFE
+            must_keep_features = self.indicator_engine.get_must_keep_features()
+            rfe_candidates = self.indicator_engine.get_rfe_candidates()
+            
+            logger.info(f"[TRAIN] Must keep features: {len(must_keep_features)}")
+            logger.info(f"[TRAIN] RFE candidate features: {len(rfe_candidates)}")
+            
+            # Generate labels (simple momentum strategy for demo)
+            labels = self.generate_training_labels(features_df)
+            
+            # Start model training with RFE
+            await self.trading_engine.start_post_bootstrap_training(
+                features_df=features_df,
+                labels=labels,
+                recent_data_df=recent_data,
+                must_keep_features=must_keep_features,
+                rfe_candidates=rfe_candidates
+            )
+            
+            # Check if training was successful
+            if self.ml_model.is_trained:
+                logger.success(f"[TRAIN] OHLCV-based training completed successfully")
+                logger.info(f"[TRAIN] Model version: {self.ml_model.model_version}")
+                logger.info(f"[TRAIN] Training accuracy: {self.ml_model.model_performance.get('accuracy', 0.0):.4f}")
+                logger.info(f"[TRAIN] Selected features: {len(self.ml_model.selected_features)}")
+            else:
+                logger.warning("[TRAIN] OHLCV-based training failed - using fallback signals")
+            
+        except Exception as e:
+            logger.error(f"[TRAIN] OHLCV-based training failed: {e}")
+            # Don't raise - continue with fallback functionality
+            logger.warning("[TRAIN] Continuing with fallback functionality")
+    
+    def generate_training_labels(self, df: pd.DataFrame) -> pd.Series:
+        """Generate simple training labels based on price movement (for demo)"""
+        try:
+            # Simple momentum-based labeling
+            # This is a placeholder - in production you'd want more sophisticated labeling
+            if 'close' not in df.columns:
+                raise ValueError("Close price not available for labeling")
+            
+            # Calculate future returns (next period)
+            future_returns = df['close'].pct_change().shift(-1)
+            
+            # Create labels based on return thresholds
+            labels = pd.Series(index=df.index, dtype='object')
+            labels[future_returns > 0.002] = 'BUY'    # >0.2% return
+            labels[future_returns < -0.002] = 'SELL'  # <-0.2% return  
+            labels[labels.isna()] = 'HOLD'             # Everything else
+            
+            # Remove last row (no future data)
+            labels = labels[:-1]
+            
+            logger.info(f"[TRAIN] Generated labels: {labels.value_counts().to_dict()}")
+            return labels
+            
+        except Exception as e:
+            logger.error(f"[TRAIN] Failed to generate labels: {e}")
+            # Return dummy labels
+            dummy_labels = pd.Series(['HOLD'] * len(df), index=df.index)
+            return dummy_labels[:-1]
+    
+    # ==================== LEGACY BOOTSTRAP PHASES (DISABLED IN OHLCV-ONLY MODE) ====================
+    
+    async def run_bootstrap_collection(self) -> bool:
+        """Legacy bootstrap collection - disabled in OHLCV-only mode"""
+        logger.info("[BOOTSTRAP] Bootstrap collection disabled in OHLCV-only mode")
+        logger.info("[BOOTSTRAP] Using preloaded candles table data instead")
+        return True
     
     async def prepare_indicators(self):
-        """Prepare indicators after bootstrap collection"""
+        """Prepare OHLCV-only indicators (legacy method - now integrated into training)"""
         try:
-            logger.info("[INDICATORS] Loading and parsing encyclopedia...")
+            logger.info("[INDICATORS] OHLCV-only indicator preparation...")
             
-            # The indicator engine was already initialized, but let's get a summary
+            # The indicator engine was already initialized with OHLCV-only config
             indicators_summary = self.indicator_engine.get_indicators_summary()
             
-            logger.info(f"[INDICATORS] Encyclopedia summary:")
+            logger.info(f"[INDICATORS] OHLCV-only summary:")
             logger.info(f"[INDICATORS]   - Total defined: {indicators_summary.get('total_defined', 0)}")
             logger.info(f"[INDICATORS]   - Must keep: {indicators_summary.get('must_keep_count', 0)}")
             logger.info(f"[INDICATORS]   - RFE candidates: {indicators_summary.get('rfe_candidate_count', 0)}")
-            logger.info(f"[INDICATORS]   - Computed: {indicators_summary.get('computed_count', 0)}")
             
-            skipped = indicators_summary.get('skipped', [])
-            if skipped:
-                logger.info(f"[INDICATORS] Skipped {len(skipped)} indicators:")
-                for skip in skipped[:5]:  # Show first 5
-                    logger.info(f"[INDICATORS]   - {skip['name']}: {skip['reason']}")
-                if len(skipped) > 5:
-                    logger.info(f"[INDICATORS]   - ... and {len(skipped) - 5} more")
-            
-            logger.success("[INDICATORS] Indicator preparation completed")
+            logger.success("[INDICATORS] OHLCV-only indicator preparation completed")
             
         except Exception as e:
             logger.error(f"[INDICATORS] Indicator preparation failed: {e}")
             raise
     
     async def run_initial_training(self):
-        """Run the initial model training after bootstrap collection"""
-        try:
-            logger.info("[TRAIN] Starting initial model training phase...")
-            
-            # Start post-bootstrap training
-            await self.trading_engine.start_post_bootstrap_training()
-            
-            # Check if training was successful
-            if self.ml_model.is_trained:
-                logger.success(f"[TRAIN] Initial training completed successfully")
-                logger.info(f"[TRAIN] Model version: {self.ml_model.model_version}")
-                logger.info(f"[TRAIN] Training accuracy: {self.ml_model.model_performance.get('accuracy', 0.0):.4f}")
-                logger.info(f"[TRAIN] Selected features: {self.ml_model.selected_feature_count}")
-            else:
-                logger.warning("[TRAIN] Initial training failed - using fallback signals")
-                logger.info("[TRAIN] System will continue with technical indicator fallbacks")
-            
-        except Exception as e:
-            logger.error(f"[TRAIN] Initial training phase failed: {e}")
-            # Don't raise - continue with fallback functionality
-            logger.warning("[TRAIN] Continuing with fallback functionality")
+        """Legacy initial training method - now handled by run_ohlcv_model_training"""
+        logger.info("[TRAIN] Legacy training method - training now handled in run_ohlcv_model_training")
+        logger.info("[TRAIN] This method is kept for backward compatibility only")
     
     async def start_trading_operations(self):
         """Start trading operations and online learning"""
