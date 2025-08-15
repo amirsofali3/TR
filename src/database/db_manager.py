@@ -33,6 +33,7 @@ class DatabaseManager:
         """Auto-detect database backend based on configuration"""
         # Check for MySQL configuration via environment variables
         mysql_enabled = os.getenv('MYSQL_ENABLED', 'false').lower() == 'true'
+        mysql_db_set = os.getenv('MYSQL_DB') is not None
         
         if mysql_enabled and MYSQL_AVAILABLE:
             self.backend = 'mysql'
@@ -46,6 +47,15 @@ class DatabaseManager:
                 'autocommit': True
             }
             logger.info(f"Using MySQL backend: {self.mysql_config['user']}@{self.mysql_config['host']}:{self.mysql_config['port']}/{self.mysql_config['database']}")
+        elif mysql_db_set and not mysql_enabled:
+            # User set MYSQL_DB but didn't enable MySQL - provide helpful message
+            logger.warning(f"MYSQL_DB is set to '{os.getenv('MYSQL_DB')}' but MYSQL_ENABLED is not 'true'. Using SQLite instead.")
+            logger.info("To use MySQL, set: export MYSQL_ENABLED=true")
+            self.backend = 'sqlite'
+            self.sqlite_path = DATABASE_URL.replace("sqlite:///", "")
+            # Create directory if needed
+            os.makedirs(os.path.dirname(self.sqlite_path), exist_ok=True)
+            logger.info(f"Using SQLite backend: {self.sqlite_path}")
         else:
             self.backend = 'sqlite'
             self.sqlite_path = DATABASE_URL.replace("sqlite:///", "")
