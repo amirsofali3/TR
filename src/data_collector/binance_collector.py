@@ -547,15 +547,17 @@ class BinanceDataCollector:
                     VALUES (%s, %s, %s, %s)
                 '''
                 db_manager.execute(insert_query, (symbol, timestamp, price, volume))
+                logger.debug(f"[COLLECT] Stored tick for {symbol}: price={price}, timestamp={timestamp}")
             else:
                 insert_query = f'''
                     INSERT INTO {ticks_table} (symbol, timestamp, price, volume)
                     VALUES (?, ?, ?, ?)
                 '''
                 db_manager.execute(insert_query, (symbol, timestamp, price, volume))
+                logger.debug(f"[COLLECT] Stored tick for {symbol}: price={price}, timestamp={timestamp}")
                 
         except Exception as e:
-            logger.debug(f"[COLLECT] Failed to store tick data for {symbol}: {e}")
+            logger.error(f"[COLLECT] Failed to store tick data for {symbol}: {e}")
     
     async def _aggregate_bootstrap_data(self):
         """Aggregate collected tick data to 1-minute OHLC"""

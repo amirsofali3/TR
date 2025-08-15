@@ -376,6 +376,40 @@ def create_app(data_collector=None, indicator_engine=None, ml_model=None, tradin
             logger.error(f"Change analysis interval error: {e}")
             return jsonify({'error': str(e)}), 500
     
+    @app.route('/api/database/stats')
+    def get_database_stats():
+        """Get database statistics and diagnostics"""
+        try:
+            from src.database.db_manager import db_manager
+            
+            stats = {
+                'backend': db_manager.backend,
+                'backend_info': db_manager.get_backend_info(),
+                'tables': {}
+            }
+            
+            # Get table record counts
+            tables = ['market_ticks', 'market_data', 'ohlc_1s', 'ohlc_1m', 
+                     'model_training_runs', 'real_time_prices', 'positions']
+            
+            for table in tables:
+                try:
+                    result = db_manager.fetchone(f"SELECT COUNT(*) FROM {table}")
+                    stats['tables'][table] = result[0] if result else 0
+                except Exception as e:
+                    stats['tables'][table] = f"Error: {str(e)}"
+            
+            # Get collection status if available
+            if app.data_collector:
+                collection_status = app.data_collector.get_bootstrap_status()
+                stats['collection_status'] = collection_status
+            
+            return jsonify(stats)
+            
+        except Exception as e:
+            logger.error(f"Database stats API error: {e}")
+            return jsonify({'error': str(e)}), 500
+    
     # SocketIO events for real-time updates
     @socketio.on('connect')
     def handle_connect():
