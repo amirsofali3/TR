@@ -21,7 +21,7 @@ from src.database.db_manager import db_manager
 from config.settings import *
 
 class BinanceDataCollector:
-    """Handles data collection from Binance API"""
+    """Handles data collection from Binance API with bootstrap support"""
     
     def __init__(self):
         self.client = None
@@ -31,6 +31,14 @@ class BinanceDataCollector:
         self.price_cache = {}
         self.data_cache = {}
         self.running = False
+        
+        # Bootstrap collection state
+        self.bootstrap_active = False
+        self.bootstrap_start_time = None
+        self.bootstrap_duration = INITIAL_COLLECTION_DURATION_SEC
+        self.bootstrap_progress = 0.0
+        self.bootstrap_records_collected = {}
+        self.bootstrap_total_records = 0
         
     async def initialize(self):
         """Initialize the data collector"""
@@ -77,9 +85,9 @@ class BinanceDataCollector:
             # Initialize database
             await self.init_database()
             
-            # Fetch initial historical data
-            logger.info("📊 Fetching initial market data...")
-            await self.fetch_initial_data()
+            # Bootstrap mode is handled separately by start_bootstrap_collection()
+            # Don't fetch initial data automatically anymore
+            logger.info("📊 Data collector initialized - ready for bootstrap collection")
             
             logger.success("✅ Binance data collector initialized successfully")
             
@@ -93,85 +101,20 @@ class BinanceDataCollector:
             raise
     
     async def init_database(self):
-        """Initialize database for storing market data (MySQL migration)"""
+        """Initialize database for storing market data (Complete Pipeline Restructure)"""
         try:
-            # Create data directory if using SQLite
-            if db_manager.backend == 'sqlite':
-                import os
-                os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
+            logger.info("[DB] Initializing database schema...")
             
-            # Create tables for market data
-            if db_manager.backend == 'mysql':
-                # MySQL schema
-                db_manager.execute('''
-                    CREATE TABLE IF NOT EXISTS market_data (
-                        id INT AUTO_INCREMENT PRIMARY KEY,
-                        symbol VARCHAR(20) NOT NULL,
-                        timeframe VARCHAR(10) NOT NULL,
-                        timestamp BIGINT NOT NULL,
-                        open DECIMAL(20,8) NOT NULL,
-                        high DECIMAL(20,8) NOT NULL,
-                        low DECIMAL(20,8) NOT NULL,
-                        close DECIMAL(20,8) NOT NULL,
-                        volume DECIMAL(20,8) NOT NULL,
-                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                        UNIQUE KEY unique_candle (symbol, timeframe, timestamp)
-                    ) ENGINE=InnoDB
-                ''')
+            # Use the enhanced database manager's schema creation
+            schema_success = db_manager.ensure_schema()
+            if not schema_success:
+                logger.error("[DB] Failed to create database schema")
+                raise Exception("Database schema creation failed")
                 
-                # Real-time prices table
-                db_manager.execute('''
-                    CREATE TABLE IF NOT EXISTS real_time_prices (
-                        symbol VARCHAR(20) PRIMARY KEY,
-                        price DECIMAL(20,8) NOT NULL,
-                        bid_price DECIMAL(20,8),
-                        ask_price DECIMAL(20,8),
-                        bid_size DECIMAL(20,8),
-                        ask_size DECIMAL(20,8),
-                        timestamp BIGINT NOT NULL,
-                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
-                    ) ENGINE=InnoDB
-                ''')
-            else:
-                # SQLite schema (original)
-                db_manager.execute('''
-                    CREATE TABLE IF NOT EXISTS market_data (
-                        id INTEGER PRIMARY KEY AUTOINCREMENT,
-                        symbol TEXT NOT NULL,
-                        timeframe TEXT NOT NULL,
-                        timestamp INTEGER NOT NULL,
-                        open REAL NOT NULL,
-                        high REAL NOT NULL,
-                        low REAL NOT NULL,
-                        close REAL NOT NULL,
-                        volume REAL NOT NULL,
-                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                        UNIQUE(symbol, timeframe, timestamp)
-                    )
-                ''')
-                
-                # Real-time prices table
-                db_manager.execute('''
-                    CREATE TABLE IF NOT EXISTS real_time_prices (
-                        symbol TEXT PRIMARY KEY,
-                        price REAL NOT NULL,
-                        bid_price REAL,
-                        ask_price REAL,
-                        bid_size REAL,
-                        ask_size REAL,
-                        timestamp INTEGER NOT NULL,
-                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                    )
-                ''')
-            
-            # Create indexes for better performance
-            db_manager.execute('CREATE INDEX IF NOT EXISTS idx_market_data_symbol_time ON market_data(symbol, timeframe, timestamp)')
-            db_manager.execute('CREATE INDEX IF NOT EXISTS idx_prices_symbol ON real_time_prices(symbol)')
-            
-            logger.info("Database initialized successfully")
+            logger.success("[DB] Database schema initialized successfully")
             
         except Exception as e:
-            logger.error(f"Failed to initialize database: {e}")
+            logger.error(f"❌ Database initialization failed: {e}")
             raise
     
     async def fetch_initial_data(self):
@@ -475,6 +418,263 @@ class BinanceDataCollector:
             except Exception as e:
                 logger.error(f"Error in real-time updates: {e}")
                 await asyncio.sleep(5)
+    
+    # ==================== BOOTSTRAP COLLECTION SYSTEM ====================
+    
+    async def start_bootstrap_collection(self, duration: int = None) -> bool:
+        """Start bootstrap data collection phase (Complete Pipeline Restructure)"""
+        try:
+            self.bootstrap_duration = duration or INITIAL_COLLECTION_DURATION_SEC
+            self.bootstrap_active = True
+            self.bootstrap_start_time = datetime.now()
+            self.bootstrap_progress = 0.0
+            self.bootstrap_records_collected = {symbol: 0 for symbol in SUPPORTED_PAIRS}
+            self.bootstrap_total_records = 0
+            
+            logger.info(f"[BOOTSTRAP] Starting bootstrap data collection for {self.bootstrap_duration} seconds")
+            logger.info(f"[BOOTSTRAP] Collecting {INITIAL_COLLECTION_TIMEFRAME} data for {len(SUPPORTED_PAIRS)} symbols")
+            logger.info(f"[BOOTSTRAP] Symbols: {', '.join(SUPPORTED_PAIRS)}")
+            
+            # Start collection loop
+            collection_success = await self._run_bootstrap_collection()
+            
+            # Mark bootstrap as complete
+            self.bootstrap_active = False
+            
+            if collection_success:
+                logger.success(f"[BOOTSTRAP] Data collection completed successfully!")
+                logger.info(f"[BOOTSTRAP] Total records collected: {self.bootstrap_total_records}")
+                logger.info(f"[BOOTSTRAP] Records per symbol: {dict(self.bootstrap_records_collected)}")
+                
+                # Aggregate data to 1-minute OHLC if needed
+                await self._aggregate_bootstrap_data()
+                
+                return True
+            else:
+                logger.error("[BOOTSTRAP] Data collection failed")
+                return False
+                
+        except Exception as e:
+            logger.error(f"[BOOTSTRAP] Failed to start bootstrap collection: {e}")
+            self.bootstrap_active = False
+            return False
+    
+    async def _run_bootstrap_collection(self) -> bool:
+        """Run the actual bootstrap data collection loop"""
+        try:
+            start_time = time.time()
+            end_time = start_time + self.bootstrap_duration
+            
+            logger.info(f"[COLLECT] Starting collection loop for {self.bootstrap_duration}s")
+            
+            while time.time() < end_time and self.bootstrap_active:
+                collection_start = time.time()
+                
+                # Update progress
+                elapsed = time.time() - start_time
+                self.bootstrap_progress = min((elapsed / self.bootstrap_duration) * 100, 100.0)
+                
+                # Collect data for all symbols
+                for symbol in SUPPORTED_PAIRS:
+                    try:
+                        # Fetch current price data (simulating 1-second ticks)
+                        await self._collect_tick_data(symbol)
+                        
+                    except Exception as e:
+                        logger.debug(f"[COLLECT] Failed to collect tick for {symbol}: {e}")
+                        continue
+                
+                # Calculate sleep time to maintain 1-second intervals
+                collection_time = time.time() - collection_start
+                sleep_time = max(0, 1.0 - collection_time)
+                
+                if sleep_time > 0:
+                    await asyncio.sleep(sleep_time)
+                
+                # Log progress every 60 seconds
+                if int(elapsed) % 60 == 0 and int(elapsed) > 0:
+                    remaining = max(0, self.bootstrap_duration - elapsed)
+                    logger.info(f"[COLLECT] Progress: {self.bootstrap_progress:.1f}% | "
+                              f"Elapsed: {int(elapsed)}s | Remaining: {int(remaining)}s | "
+                              f"Total records: {self.bootstrap_total_records}")
+            
+            logger.success(f"[COLLECT] Collection loop completed")
+            return True
+            
+        except Exception as e:
+            logger.error(f"[COLLECT] Collection loop failed: {e}")
+            return False
+    
+    async def _collect_tick_data(self, symbol: str):
+        """Collect a single tick of data for a symbol"""
+        try:
+            # Get current price from Binance API
+            if self.client:
+                ticker = self.client.get_symbol_ticker(symbol=symbol)
+                price = float(ticker['price'])
+            else:
+                # Fallback to public API
+                async with aiohttp.ClientSession() as session:
+                    url = f"https://api.binance.com/api/v3/ticker/price"
+                    params = {'symbol': symbol}
+                    async with session.get(url, params=params) as response:
+                        if response.status == 200:
+                            data = await response.json()
+                            price = float(data['price'])
+                        else:
+                            return  # Skip this tick
+            
+            # Store tick data
+            timestamp = int(time.time() * 1000)  # Milliseconds
+            await self._store_tick_data(symbol, timestamp, price, 1.0)  # Volume = 1 for simplicity
+            
+            # Update counters
+            self.bootstrap_records_collected[symbol] += 1
+            self.bootstrap_total_records += 1
+            
+        except Exception as e:
+            logger.debug(f"[COLLECT] Failed to collect tick for {symbol}: {e}")
+    
+    async def _store_tick_data(self, symbol: str, timestamp: int, price: float, volume: float):
+        """Store tick data in the database"""
+        try:
+            # Get table name
+            ticks_table = os.getenv('MYSQL_MARKET_TICKS_TABLE', 'market_ticks')
+            
+            if db_manager.backend == 'mysql':
+                insert_query = f'''
+                    INSERT INTO {ticks_table} (symbol, timestamp, price, volume)
+                    VALUES (%s, %s, %s, %s)
+                '''
+                db_manager.execute(insert_query, (symbol, timestamp, price, volume))
+            else:
+                insert_query = f'''
+                    INSERT INTO {ticks_table} (symbol, timestamp, price, volume)
+                    VALUES (?, ?, ?, ?)
+                '''
+                db_manager.execute(insert_query, (symbol, timestamp, price, volume))
+                
+        except Exception as e:
+            logger.debug(f"[COLLECT] Failed to store tick data for {symbol}: {e}")
+    
+    async def _aggregate_bootstrap_data(self):
+        """Aggregate collected tick data to 1-minute OHLC"""
+        try:
+            logger.info("[COLLECT] Aggregating tick data to 1-minute OHLC...")
+            
+            for symbol in SUPPORTED_PAIRS:
+                await self._aggregate_symbol_to_1m(symbol)
+            
+            logger.success("[COLLECT] Data aggregation completed")
+            
+        except Exception as e:
+            logger.error(f"[COLLECT] Data aggregation failed: {e}")
+    
+    async def _aggregate_symbol_to_1m(self, symbol: str):
+        """Aggregate tick data for a symbol to 1-minute OHLC"""
+        try:
+            # Get table names
+            ticks_table = os.getenv('MYSQL_MARKET_TICKS_TABLE', 'market_ticks')
+            ohlc_1m_table = os.getenv('MYSQL_OHLC_1M_TABLE', 'ohlc_1m')
+            
+            # Query tick data
+            if db_manager.backend == 'mysql':
+                query = f'''
+                    SELECT timestamp, price, volume FROM {ticks_table}
+                    WHERE symbol = %s ORDER BY timestamp
+                '''
+                rows = db_manager.fetchall(query, (symbol,))
+            else:
+                query = f'''
+                    SELECT timestamp, price, volume FROM {ticks_table}
+                    WHERE symbol = ? ORDER BY timestamp
+                '''
+                rows = db_manager.fetchall(query, (symbol,))
+            
+            if not rows:
+                return
+            
+            # Group by minute and calculate OHLC
+            minute_data = {}
+            for timestamp, price, volume in rows:
+                # Round to minute
+                minute_ts = (timestamp // 60000) * 60000
+                
+                if minute_ts not in minute_data:
+                    minute_data[minute_ts] = {
+                        'open': price,
+                        'high': price,
+                        'low': price,
+                        'close': price,
+                        'volume': volume,
+                        'tick_count': 1
+                    }
+                else:
+                    data = minute_data[minute_ts]
+                    data['high'] = max(data['high'], price)
+                    data['low'] = min(data['low'], price)
+                    data['close'] = price  # Last price is close
+                    data['volume'] += volume
+                    data['tick_count'] += 1
+            
+            # Insert aggregated data
+            for minute_ts, ohlc_data in minute_data.items():
+                if db_manager.backend == 'mysql':
+                    insert_query = f'''
+                        INSERT INTO {ohlc_1m_table} 
+                        (symbol, timestamp, open, high, low, close, volume, tick_count)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                        ON DUPLICATE KEY UPDATE
+                        open = VALUES(open), high = VALUES(high), low = VALUES(low),
+                        close = VALUES(close), volume = VALUES(volume), tick_count = VALUES(tick_count)
+                    '''
+                    params = (symbol, minute_ts, ohlc_data['open'], ohlc_data['high'], 
+                             ohlc_data['low'], ohlc_data['close'], ohlc_data['volume'], 
+                             ohlc_data['tick_count'])
+                else:
+                    insert_query = f'''
+                        INSERT OR REPLACE INTO {ohlc_1m_table}
+                        (symbol, timestamp, open, high, low, close, volume, tick_count)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    '''
+                    params = (symbol, minute_ts, ohlc_data['open'], ohlc_data['high'], 
+                             ohlc_data['low'], ohlc_data['close'], ohlc_data['volume'], 
+                             ohlc_data['tick_count'])
+                
+                db_manager.execute(insert_query, params)
+            
+            logger.info(f"[COLLECT] Aggregated {len(minute_data)} 1-minute candles for {symbol}")
+            
+        except Exception as e:
+            logger.error(f"[COLLECT] Failed to aggregate data for {symbol}: {e}")
+    
+    def get_bootstrap_status(self) -> Dict:
+        """Get bootstrap collection status"""
+        if not self.bootstrap_active:
+            return {
+                'enabled': False,
+                'duration_sec': self.bootstrap_duration,
+                'elapsed_sec': 0,
+                'remaining_sec': 0,
+                'percent': 100.0 if hasattr(self, 'bootstrap_start_time') and self.bootstrap_start_time else 0.0,
+                'records_total': self.bootstrap_total_records,
+                'records_per_symbol': dict(self.bootstrap_records_collected)
+            }
+        
+        elapsed = (datetime.now() - self.bootstrap_start_time).total_seconds() if self.bootstrap_start_time else 0
+        remaining = max(0, self.bootstrap_duration - elapsed)
+        
+        return {
+            'enabled': True,
+            'duration_sec': self.bootstrap_duration,
+            'elapsed_sec': int(elapsed),
+            'remaining_sec': int(remaining),
+            'percent': self.bootstrap_progress,
+            'records_total': self.bootstrap_total_records,
+            'records_per_symbol': dict(self.bootstrap_records_collected)
+        }
+    
+    # ==================== END BOOTSTRAP COLLECTION SYSTEM ====================
     
     async def stop(self):
         """Stop data collector"""

@@ -4,23 +4,48 @@ Technical Indicator Engine for calculating all trading indicators
 
 import pandas as pd
 import numpy as np
-import talib
 from typing import Dict, List, Optional, Any
 from loguru import logger
 import os
 import csv
-from scipy import stats
-from sklearn.linear_model import LinearRegression
+
+# Optional imports - will be gracefully handled if missing
+try:
+    import talib
+    TALIB_AVAILABLE = True
+except ImportError:
+    TALIB_AVAILABLE = False
+    logger.warning("TA-Lib not available - some indicators will be skipped")
+
+try:
+    from scipy import stats
+    SCIPY_AVAILABLE = True
+except ImportError:
+    SCIPY_AVAILABLE = False
+    logger.warning("SciPy not available - some statistical indicators will be skipped")
+
+try:
+    from sklearn.linear_model import LinearRegression
+    SKLEARN_AVAILABLE = True
+except ImportError:
+    SKLEARN_AVAILABLE = False
+    logger.warning("Scikit-learn not available - some ML-based indicators will be skipped")
 
 class IndicatorEngine:
-    """Calculates all technical indicators from the CSV file"""
+    """Calculates all technical indicators from the CSV file with encyclopedia support"""
     
     def __init__(self):
         self.indicators_config = {}
-        self.required_indicators = set()
+        self.required_indicators = set()  # must_keep indicators
         self.rfe_eligible_indicators = set()
         self.indicator_functions = {}
         self.prerequisite_map = {}
+        
+        # New fields for Complete Pipeline Restructure
+        self.skipped_indicators = []  # List of {name, reason} for skipped indicators
+        self.computed_indicators = set()  # Successfully computed indicators
+        self.must_keep_features = []  # Final list of must-keep feature names
+        self.rfe_candidates = []  # Final list of RFE candidate feature names
         
     async def initialize(self):
         """Initialize the indicator engine"""
@@ -40,58 +65,77 @@ class IndicatorEngine:
             raise
     
     async def load_indicators_config(self):
-        """Load indicators configuration from CSV file"""
+        """Load indicators configuration from CSV file (Complete Pipeline Restructure)"""
         try:
             # Use relative path from project root
             import os
             project_root = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
             csv_path = os.path.join(project_root, "crypto_trading_feature_encyclopedia.csv")
             
+            logger.info(f"[INDICATORS] Loading encyclopedia from: {csv_path}")
+            
             with open(csv_path, 'r', encoding='utf-8') as file:
                 reader = csv.DictReader(file)
                 
+                total_indicators = 0
+                must_keep_count = 0
+                rfe_eligible_count = 0
+                
                 for row in reader:
-                    indicator_name = row['Indicator']
+                    indicator_name = row['Indicator'].strip()
+                    if not indicator_name:
+                        continue
+                    
+                    total_indicators += 1
+                    
+                    # Parse boolean fields safely
+                    must_keep = row.get('Must Keep (Not in RFE)', '').lower().strip() == 'yes'
+                    rfe_eligible = row.get('RFE Eligible', '').lower().strip() == 'yes'
                     
                     self.indicators_config[indicator_name] = {
-                        'category': row['Category'],
-                        'required_inputs': row['Required Inputs'],
-                        'formula': row['Formula / Calculation'],
-                        'must_keep': row['Must Keep (Not in RFE)'].lower() == 'yes',
-                        'rfe_eligible': row['RFE Eligible'].lower() == 'yes',
-                        'prerequisite_for': row['Prerequisite For'],
-                        'parameters': row['Parameters'],
-                        'outputs': row['Outputs']
+                        'category': row.get('Category', '').strip(),
+                        'required_inputs': row.get('Required Inputs', '').strip(),
+                        'formula': row.get('Formula / Calculation', '').strip(),
+                        'must_keep': must_keep,
+                        'rfe_eligible': rfe_eligible,
+                        'prerequisite_for': row.get('Prerequisite For', '').strip(),
+                        'parameters': row.get('Parameters', '').strip(),
+                        'outputs': row.get('Outputs', '').strip()
                     }
                     
                     # Track required indicators (must keep)
-                    if row['Must Keep (Not in RFE)'].lower() == 'yes':
+                    if must_keep:
                         self.required_indicators.add(indicator_name)
+                        must_keep_count += 1
                     
                     # Track RFE eligible indicators
-                    if row['RFE Eligible'].lower() == 'yes':
+                    if rfe_eligible:
                         self.rfe_eligible_indicators.add(indicator_name)
+                        rfe_eligible_count += 1
                     
                     # Track prerequisites
-                    if row['Prerequisite For']:
-                        for prereq in row['Prerequisite For'].split(','):
+                    prereq_for = row.get('Prerequisite For', '').strip()
+                    if prereq_for:
+                        for prereq in prereq_for.split(','):
                             prereq = prereq.strip()
-                            if prereq not in self.prerequisite_map:
-                                self.prerequisite_map[prereq] = []
-                            self.prerequisite_map[prereq].append(indicator_name)
+                            if prereq:
+                                if prereq not in self.prerequisite_map:
+                                    self.prerequisite_map[prereq] = []
+                                self.prerequisite_map[prereq].append(indicator_name)
             
-            logger.info(f"Loaded {len(self.indicators_config)} indicators")
-            logger.info(f"Required indicators: {len(self.required_indicators)}")
-            logger.info(f"RFE eligible indicators: {len(self.rfe_eligible_indicators)}")
+            logger.success(f"[INDICATORS] Encyclopedia loaded successfully:")
+            logger.info(f"[INDICATORS]   - Total defined: {total_indicators}")
+            logger.info(f"[INDICATORS]   - Must keep: {must_keep_count}")
+            logger.info(f"[INDICATORS]   - RFE eligible: {rfe_eligible_count}")
+            logger.info(f"[INDICATORS]   - With prerequisites: {len(self.prerequisite_map)}")
             
         except FileNotFoundError:
-            logger.error(f"Indicators CSV file not found at {csv_path}")
-            logger.info("Falling back to default indicators configuration")
-            # Set up minimal default indicators
+            logger.error(f"[INDICATORS] Encyclopedia CSV file not found at {csv_path}")
+            logger.info("[INDICATORS] Falling back to default indicators configuration")
             self._setup_default_indicators()
         except Exception as e:
-            logger.error(f"Failed to load indicators config: {e}")
-            logger.info("Falling back to default indicators configuration")
+            logger.error(f"[INDICATORS] Failed to load encyclopedia: {e}")
+            logger.info("[INDICATORS] Falling back to default indicators configuration")
             self._setup_default_indicators()
     
     def _setup_default_indicators(self):
@@ -379,15 +423,19 @@ class IndicatorEngine:
         return (bb['upper'] - bb['lower']) / bb['middle']
     
     async def calculate_all_indicators(self, df: pd.DataFrame, symbol: str = None) -> Dict[str, Any]:
-        """Calculate all indicators for the given data"""
+        """Calculate all indicators for the given data (Complete Pipeline Restructure)"""
         try:
             results = {}
             calculated = set()
+            self.skipped_indicators = []  # Reset skipped indicators list
+            self.computed_indicators = set()
             
             # Add symbol if provided
             if symbol:
                 df = df.copy()
                 df['symbol'] = symbol
+            
+            logger.info(f"[INDICATORS] Calculating indicators for {len(df)} data points...")
             
             # Calculate indicators in dependency order
             max_iterations = 10  # Prevent infinite loops
@@ -403,39 +451,115 @@ class IndicatorEngine:
                     
                     try:
                         # Check if we have all prerequisites
-                        if self.can_calculate_indicator(indicator_name, calculated):
+                        if self.can_calculate_indicator(indicator_name, calculated, df):
                             result = calc_function(df)
+                            
+                            # Validate result
+                            if result is None or (hasattr(result, '__len__') and len(result) == 0):
+                                self.skipped_indicators.append({
+                                    'name': indicator_name,
+                                    'reason': 'Empty or None result returned'
+                                })
+                                continue
                             
                             if isinstance(result, dict):
                                 # Handle multi-output indicators
                                 for key, value in result.items():
-                                    results[f"{indicator_name}_{key}"] = value
+                                    feature_name = f"{indicator_name}_{key}"
+                                    results[feature_name] = value
+                                    self.computed_indicators.add(feature_name)
                             else:
                                 results[indicator_name] = result
+                                self.computed_indicators.add(indicator_name)
                             
                             calculated.add(indicator_name)
                             
                     except Exception as e:
-                        logger.debug(f"Could not calculate {indicator_name}: {e}")
+                        self.skipped_indicators.append({
+                            'name': indicator_name,
+                            'reason': f'Calculation error: {str(e)}'
+                        })
+                        logger.debug(f"[INDICATORS] Could not calculate {indicator_name}: {e}")
                         continue
                 
                 # If no progress was made, break to avoid infinite loop
                 if len(calculated) == initial_count:
                     break
             
-            logger.info(f"Calculated {len(calculated)} out of {len(self.indicator_functions)} indicators")
+            # Mark remaining indicators as skipped due to missing dependencies
+            for indicator_name in self.indicator_functions.keys():
+                if indicator_name not in calculated:
+                    self.skipped_indicators.append({
+                        'name': indicator_name,
+                        'reason': 'Missing dependencies or insufficient iterations'
+                    })
+            
+            # Build final feature lists
+            self.must_keep_features = []
+            self.rfe_candidates = []
+            
+            for feature_name in self.computed_indicators:
+                # Check if this feature corresponds to a must-keep indicator
+                base_indicator = feature_name.split('_')[0] if '_' in feature_name else feature_name
+                
+                if base_indicator in self.required_indicators:
+                    self.must_keep_features.append(feature_name)
+                elif base_indicator in self.rfe_eligible_indicators:
+                    self.rfe_candidates.append(feature_name)
+                # Core price data is always must-keep
+                elif feature_name.lower() in ['timestamp', 'open', 'high', 'low', 'close', 'volume', 'symbol']:
+                    self.must_keep_features.append(feature_name)
+            
+            logger.success(f"[INDICATORS] Calculation completed:")
+            logger.info(f"[INDICATORS]   - Computed: {len(self.computed_indicators)}")
+            logger.info(f"[INDICATORS]   - Must keep: {len(self.must_keep_features)}")
+            logger.info(f"[INDICATORS]   - RFE candidates: {len(self.rfe_candidates)}")
+            logger.info(f"[INDICATORS]   - Skipped: {len(self.skipped_indicators)}")
+            
+            if self.skipped_indicators:
+                logger.warning(f"[INDICATORS] {len(self.skipped_indicators)} indicators were skipped")
+                for skipped in self.skipped_indicators[:5]:  # Show first 5
+                    logger.debug(f"[INDICATORS]   - {skipped['name']}: {skipped['reason']}")
+                if len(self.skipped_indicators) > 5:
+                    logger.debug(f"[INDICATORS]   - ... and {len(self.skipped_indicators) - 5} more")
             
             return results
             
         except Exception as e:
-            logger.error(f"Failed to calculate indicators: {e}")
+            logger.error(f"[INDICATORS] Failed to calculate indicators: {e}")
             return {}
     
-    def can_calculate_indicator(self, indicator_name: str, calculated: set) -> bool:
-        """Check if an indicator can be calculated based on prerequisites"""
-        # For now, assume all can be calculated if we have basic OHLCV data
-        # This can be enhanced to check specific prerequisites
-        return True
+    def can_calculate_indicator(self, indicator_name: str, calculated: set, df: pd.DataFrame = None) -> bool:
+        """Check if an indicator can be calculated based on prerequisites (Complete Pipeline Restructure)"""
+        try:
+            # Check if we have the basic OHLCV data required
+            if df is not None:
+                required_columns = ['open', 'high', 'low', 'close', 'volume']
+                if not all(col in df.columns for col in required_columns):
+                    return False
+                
+                # Check for sufficient data points
+                if len(df) < 2:
+                    return False
+            
+            # Check specific prerequisites from configuration
+            config = self.indicators_config.get(indicator_name, {})
+            required_inputs = config.get('required_inputs', '')
+            
+            if required_inputs:
+                # Parse required inputs and check if they're available
+                inputs = [inp.strip() for inp in required_inputs.split(',') if inp.strip()]
+                for required_input in inputs:
+                    # Check if required input is in calculated indicators or basic OHLCV
+                    if (required_input not in calculated and 
+                        required_input.lower() not in ['ohlcv', 'ohlc', 'price', 'volume', 'timestamp']):
+                        return False
+            
+            return True
+            
+        except Exception as e:
+            logger.debug(f"[INDICATORS] Error checking prerequisites for {indicator_name}: {e}")
+            return False
     
     def get_rfe_eligible_indicators(self) -> List[str]:
         """Get list of indicators eligible for RFE"""
@@ -444,3 +568,29 @@ class IndicatorEngine:
     def get_required_indicators(self) -> List[str]:
         """Get list of indicators that must be kept"""
         return list(self.required_indicators)
+    
+    # New methods for Complete Pipeline Restructure
+    
+    def get_must_keep_features(self) -> List[str]:
+        """Get final list of must-keep feature names after calculation"""
+        return self.must_keep_features.copy()
+    
+    def get_rfe_candidates(self) -> List[str]:
+        """Get final list of RFE candidate feature names after calculation"""
+        return self.rfe_candidates.copy()
+    
+    def get_skipped_indicators(self) -> List[Dict[str, str]]:
+        """Get list of indicators that were skipped with reasons"""
+        return self.skipped_indicators.copy()
+    
+    def get_indicators_summary(self) -> Dict[str, Any]:
+        """Get comprehensive summary of indicators status (Complete Pipeline Restructure)"""
+        return {
+            'total_defined': len(self.indicators_config),
+            'must_keep_count': len(self.required_indicators),
+            'rfe_candidate_count': len(self.rfe_eligible_indicators),
+            'computed_count': len(self.computed_indicators),
+            'skipped': self.get_skipped_indicators(),
+            'must_keep_features': self.get_must_keep_features(),
+            'rfe_candidates': self.get_rfe_candidates()
+        }
