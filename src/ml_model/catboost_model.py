@@ -425,7 +425,11 @@ class CatBoostTradingModel:
         """Make predictions with confidence scores"""
         try:
             if not self.is_trained or self.model is None:
-                logger.warning("Model is not trained")
+                # Reduce warning spam by logging warning only every N predictions (MySQL migration)
+                self.prediction_warning_counter += 1
+                if self.prediction_warning_counter % 10 == 1:  # Log every 10th warning
+                    logger.warning(f"Model is not trained (warning #{self.prediction_warning_counter})")
+                
                 return {
                     'prediction': 'HOLD',
                     'confidence': 0.0,
@@ -438,8 +442,23 @@ class CatBoostTradingModel:
             # Select only trained features
             if self.selected_features:
                 available_features = [f for f in self.selected_features if f in X_processed.columns]
+                
+                # Log once if missing > 20% of expected features (MySQL migration)
+                missing_pct = (len(self.selected_features) - len(available_features)) / len(self.selected_features)
+                if missing_pct > 0.2:
+                    if not hasattr(self, '_missing_features_warned'):
+                        logger.warning(f"Missing {missing_pct:.1%} of expected features ({len(self.selected_features) - len(available_features)}/{len(self.selected_features)})")
+                        self._missing_features_warned = True
+                
                 if available_features:
                     X_processed = X_processed[available_features]
+                else:
+                    logger.warning("No trained features available")
+                    return {
+                        'prediction': 'HOLD',
+                        'confidence': 0.0,
+                        'probabilities': {'SELL': 0.33, 'HOLD': 0.34, 'BUY': 0.33}
+                    }
             
             # Make prediction
             prediction_proba = self.model.predict_proba(X_processed)
@@ -588,7 +607,7 @@ class CatBoostTradingModel:
             logger.warning(f"Failed to load existing model: {e}")
     
     def get_model_info(self) -> Dict[str, Any]:
-        """Get model information for web interface"""
+        """Get model information for web interface (MySQL migration enhanced)"""
         return {
             'is_trained': self.is_trained,
             'training_progress': self.training_progress,
@@ -597,5 +616,15 @@ class CatBoostTradingModel:
             'total_features_count': len(self.feature_weights),
             'active_features': [f for f, w in self.feature_weights.items() if w == self.active_weight],
             'inactive_features': [f for f, w in self.feature_weights.items() if w == self.inactive_weight],
-            'feature_importance': self.feature_importance
+            'feature_importance': self.feature_importance,
+            # MySQL migration enhancements
+            'fallback_active': not self.is_trained,
+            'last_training_time': self.model_performance.get('training_date', None),
+            'samples_in_last_train': self.model_performance.get('training_samples', 0),
+            'class_distribution': self.model_performance.get('class_distribution', {}),
+            'training_cooldown_active': (
+                self.training_cooldown_until and 
+                datetime.now() < self.training_cooldown_until
+            ) if hasattr(self, 'training_cooldown_until') and self.training_cooldown_until else False,
+            'prediction_warning_count': getattr(self, 'prediction_warning_counter', 0)
         }

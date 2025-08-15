@@ -29,7 +29,7 @@ class TradingEngine:
         self.risk_manager = RiskManagementSystem()
     
     async def initialize(self):
-        """Initialize trading engine"""
+        """Initialize trading engine (MySQL migration improved)"""
         try:
             logger.info("Initializing trading engine...")
             
@@ -39,11 +39,77 @@ class TradingEngine:
             # Start risk manager monitoring
             asyncio.create_task(self.risk_manager.start_monitoring())
             
+            # Trigger initial ML model training if needed (MySQL migration)
+            await self.trigger_initial_training()
+            
             logger.success("Trading engine initialized")
             
         except Exception as e:
             logger.error(f"Failed to initialize trading engine: {e}")
             raise
+    
+    async def trigger_initial_training(self):
+        """Trigger initial model training if model is not trained and sufficient data available (MySQL migration)"""
+        try:
+            if self.ml_model.is_trained:
+                logger.info("ML model already trained, skipping initial training")
+                return
+            
+            # Check if training cooldown is active
+            if (self.ml_model.training_cooldown_until and 
+                datetime.now() < self.ml_model.training_cooldown_until):
+                logger.info("Training cooldown active, skipping initial training")
+                return
+            
+            logger.info("ML model not trained, attempting initial training...")
+            
+            # Get data for primary symbol
+            primary_symbol = 'BTCUSDT'
+            historical_data = await self.data_collector.get_historical_data(
+                primary_symbol, DEFAULT_TIMEFRAME, ML_LOOKBACK_PERIODS
+            )
+            
+            if historical_data is None or len(historical_data) < MIN_INITIAL_TRAIN_SAMPLES:
+                logger.warning(f"Insufficient data for initial training ({len(historical_data) if historical_data is not None else 0} < {MIN_INITIAL_TRAIN_SAMPLES})")
+                return
+            
+            # Calculate indicators
+            logger.info("Calculating indicators for initial training...")
+            indicators = await self.indicator_engine.calculate_all_indicators(
+                historical_data, primary_symbol
+            )
+            
+            if not indicators:
+                logger.warning("No indicators available for initial training")
+                return
+            
+            # Get RFE eligible features
+            rfe_eligible = self.indicator_engine.get_rfe_eligible_indicators()
+            
+            # Trigger training asynchronously to avoid blocking initialization
+            asyncio.create_task(self._perform_initial_training(indicators, primary_symbol, rfe_eligible))
+            
+        except Exception as e:
+            logger.error(f"Initial training trigger failed: {e}")
+    
+    async def _perform_initial_training(self, indicators: Dict, symbol: str, rfe_eligible: List[str]):
+        """Perform the actual initial training (MySQL migration)"""
+        try:
+            logger.info("[TRAIN] Starting initial model training...")
+            
+            success = await self.ml_model.retrain_online(indicators, symbol, rfe_eligible)
+            
+            if success:
+                logger.success("[TRAIN] Initial model training completed successfully!")
+            else:
+                logger.warning("[TRAIN] Initial model training failed, will use fallback signals")
+                # Set cooldown to prevent immediate retry
+                self.ml_model.training_cooldown_until = datetime.now() + timedelta(minutes=TRAIN_RETRY_COOLDOWN_MIN)
+                
+        except Exception as e:
+            logger.error(f"[TRAIN] Initial training execution failed: {e}")
+            # Set cooldown on failure
+            self.ml_model.training_cooldown_until = datetime.now() + timedelta(minutes=TRAIN_RETRY_COOLDOWN_MIN)
     
     async def analyze_markets(self):
         """Analyze all supported markets and generate signals"""
@@ -91,7 +157,7 @@ class TradingEngine:
             logger.error(f"Market analysis failed: {e}")
     
     async def analyze_symbol(self, symbol: str) -> Optional[Dict[str, Any]]:
-        """Analyze a single symbol and generate prediction"""
+        """Analyze a single symbol and generate prediction (MySQL migration improved)"""
         try:
             # Get historical data
             historical_data = await self.data_collector.get_historical_data(
@@ -110,6 +176,10 @@ class TradingEngine:
             if not indicators:
                 logger.warning(f"No indicators calculated for {symbol}")
                 return None
+            
+            # Check if model is trained, use fallback if not (MySQL migration)
+            if not self.ml_model.is_trained:
+                return await self.generate_fallback_signal(symbol, historical_data, indicators)
             
             # Prepare feature data (use last row for prediction)
             # Collect valid indicators first to avoid DataFrame fragmentation
@@ -145,7 +215,8 @@ class TradingEngine:
                 'confidence': prediction_result['confidence'],
                 'probabilities': prediction_result['probabilities'],
                 'feature_count': len(latest_features.columns),
-                'data_quality': self.assess_data_quality(historical_data, indicators)
+                'data_quality': self.assess_data_quality(historical_data, indicators),
+                'fallback': False  # MySQL migration - indicate this is ML prediction
             }
             
             logger.debug(f"Analysis for {symbol}: {prediction_result['prediction']} ({prediction_result['confidence']:.1f}%)")
@@ -154,6 +225,74 @@ class TradingEngine:
             
         except Exception as e:
             logger.error(f"Symbol analysis failed for {symbol}: {e}")
+            return None
+    
+    async def generate_fallback_signal(self, symbol: str, historical_data: pd.DataFrame, indicators: Dict) -> Optional[Dict[str, Any]]:
+        """Generate simple fallback signal when ML model not trained (MySQL migration)"""
+        try:
+            logger.debug(f"Generating fallback signal for {symbol} (model not trained)")
+            
+            # Simple fallback strategy: SMA(14) vs SMA(50) crossover + RSI thresholds
+            close_prices = historical_data['close']
+            
+            # Calculate simple moving averages
+            sma_14 = close_prices.rolling(window=14).mean()
+            sma_50 = close_prices.rolling(window=50).mean()
+            
+            # Calculate RSI (simplified)
+            delta = close_prices.diff()
+            gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+            loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+            rs = gain / loss
+            rsi = 100 - (100 / (1 + rs))
+            
+            # Get current values
+            current_price = close_prices.iloc[-1]
+            current_sma_14 = sma_14.iloc[-1]
+            current_sma_50 = sma_50.iloc[-1]
+            current_rsi = rsi.iloc[-1]
+            
+            # Generate signal
+            if pd.isna(current_sma_14) or pd.isna(current_sma_50) or pd.isna(current_rsi):
+                prediction = 'HOLD'
+                confidence = 50.0
+            elif current_sma_14 > current_sma_50 and current_rsi < 70:
+                prediction = 'BUY'
+                confidence = min(65.0, 55.0 + (current_sma_14 - current_sma_50) / current_sma_50 * 100)
+            elif current_sma_14 < current_sma_50 and current_rsi > 30:
+                prediction = 'SELL'
+                confidence = min(65.0, 55.0 + (current_sma_50 - current_sma_14) / current_sma_50 * 100)
+            else:
+                prediction = 'HOLD'
+                confidence = 55.0
+            
+            # Create fallback analysis result
+            analysis_result = {
+                'symbol': symbol,
+                'timestamp': datetime.now().isoformat(),
+                'current_price': float(current_price),
+                'prediction': prediction,
+                'confidence': float(confidence),
+                'probabilities': {
+                    'BUY': 0.5 if prediction == 'BUY' else 0.25,
+                    'HOLD': 0.5 if prediction == 'HOLD' else 0.25,
+                    'SELL': 0.5 if prediction == 'SELL' else 0.25
+                },
+                'feature_count': 3,  # SMA14, SMA50, RSI
+                'data_quality': self.assess_data_quality(historical_data, indicators),
+                'fallback': True,  # MySQL migration - indicate this is fallback
+                'fallback_indicators': {
+                    'sma_14': float(current_sma_14) if not pd.isna(current_sma_14) else None,
+                    'sma_50': float(current_sma_50) if not pd.isna(current_sma_50) else None,
+                    'rsi': float(current_rsi) if not pd.isna(current_rsi) else None
+                }
+            }
+            
+            logger.debug(f"Fallback signal for {symbol}: {prediction} ({confidence:.1f}%)")
+            return analysis_result
+            
+        except Exception as e:
+            logger.error(f"Fallback signal generation failed for {symbol}: {e}")
             return None
     
     def assess_data_quality(self, historical_data: pd.DataFrame, indicators: Dict) -> Dict[str, Any]:
