@@ -234,17 +234,25 @@ def create_app(data_collector=None, indicator_engine=None, ml_model=None, tradin
     
     @app.route('/api/retrain_model', methods=['POST'])
     def retrain_model():
-        """Manually trigger model retraining"""
+        """Manually trigger model retraining (Complete Pipeline Restructure)"""
         try:
             if not app.trading_engine:
                 return jsonify({'error': 'Trading engine not initialized'}), 500
+            
+            # Get retrain type from request
+            data = request.get_json() if request.is_json else {}
+            retrain_type = data.get('type', 'fast')  # 'fast' or 'full'
             
             # Start retraining in background
             def retrain_background():
                 loop = asyncio.new_event_loop()
                 asyncio.set_event_loop(loop)
                 try:
-                    loop.run_until_complete(app.trading_engine.retrain_models())
+                    result = loop.run_until_complete(
+                        app.trading_engine.manual_retrain(retrain_type)
+                    )
+                    # Store result for status polling if needed
+                    app.last_retrain_result = result
                 finally:
                     loop.close()
             
@@ -252,7 +260,11 @@ def create_app(data_collector=None, indicator_engine=None, ml_model=None, tradin
             thread.daemon = True
             thread.start()
             
-            return jsonify({'success': True, 'message': 'Model retraining started'})
+            return jsonify({
+                'success': True, 
+                'message': f'{retrain_type.title()} model retraining started',
+                'type': retrain_type
+            })
             
         except Exception as e:
             logger.error(f"Retrain model error: {e}")
@@ -284,17 +296,76 @@ def create_app(data_collector=None, indicator_engine=None, ml_model=None, tradin
     
     # Background task to send periodic updates
     def background_updates():
-        """Send periodic updates to connected clients"""
+        """Send periodic updates to connected clients (Complete Pipeline Restructure)"""
+        from src.utils.json_sanitize import sanitize_for_json
+        
+        last_collection_progress = None
+        last_training_progress = None
+        last_accuracy = None
+        
         while True:
             try:
-                if app.trading_engine:
-                    status = app.trading_engine.get_system_status()
-                    socketio.emit('system_update', status)
+                if not app.trading_engine:
+                    socketio.sleep(5)
+                    continue
+                    
+                # Get comprehensive system status
+                status = app.trading_engine.get_system_status()
+                
+                # Sanitize status for JSON serialization
+                status = sanitize_for_json(status)
+                
+                # Emit general system update
+                socketio.emit('system_update', status)
+                
+                # Emit specific events for Complete Pipeline Restructure
+                
+                # Collection progress event
+                collection_status = status.get('collection', {})
+                if collection_status != last_collection_progress:
+                    socketio.emit('collection_progress', collection_status)
+                    last_collection_progress = collection_status.copy() if collection_status else None
+                
+                # Training progress event
+                training_status = status.get('training', {})
+                training_progress = training_status.get('progress_percent', 0)
+                if training_progress != last_training_progress:
+                    socketio.emit('training_progress', {
+                        'progress_percent': training_progress,
+                        'current_stage': training_status.get('phase'),
+                        'training_info': training_status.get('training_progress_info', {})
+                    })
+                    last_training_progress = training_progress
+                
+                # Accuracy update event
+                current_accuracy = training_status.get('accuracy_live', 0)
+                if current_accuracy != last_accuracy:
+                    socketio.emit('accuracy_update', {
+                        'accuracy_live': current_accuracy,
+                        'last_accuracy': training_status.get('last_accuracy', 0),
+                        'accuracy_window_stats': training_status.get('accuracy_window_stats', {}),
+                        'model_version': training_status.get('model_version', 1)
+                    })
+                    last_accuracy = current_accuracy
+                
+                # Status update event (comprehensive)
+                socketio.emit('status_update', {
+                    'timestamp': status.get('timestamp'),
+                    'system_running': status.get('system_running', False),
+                    'collection': collection_status,
+                    'training': training_status,
+                    'indicators': status.get('indicators', {}),
+                    'backend': status.get('backend', {}),
+                    'online_learning': status.get('online_learning', {})
+                })
                 
                 socketio.sleep(5)  # Update every 5 seconds
                 
             except Exception as e:
                 logger.error(f"Background update error: {e}")
+                # Log the error details for debugging
+                import traceback
+                logger.debug(f"Background update error details: {traceback.format_exc()}")
                 socketio.sleep(10)
     
     # Start background updates

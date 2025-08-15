@@ -24,12 +24,19 @@ class TradingEngine:
         self.analysis_results = {}
         self.running = False
         
+        # Online Learning & Continuous Updates (Complete Pipeline Restructure)
+        self.last_retrain_time = None
+        self.next_retrain_time = None
+        self.accumulated_samples = 0  # Count of new samples since last retrain
+        self.online_learning_active = False
+        self.last_accuracy_update = None
+        
         # Import risk manager here to avoid circular imports
         from src.risk_management.risk_manager import RiskManagementSystem
         self.risk_manager = RiskManagementSystem()
     
     async def initialize(self):
-        """Initialize trading engine (MySQL migration improved)"""
+        """Initialize trading engine (Complete Pipeline Restructure)"""
         try:
             logger.info("Initializing trading engine...")
             
@@ -39,13 +46,31 @@ class TradingEngine:
             # Start risk manager monitoring
             asyncio.create_task(self.risk_manager.start_monitoring())
             
-            # Trigger initial ML model training if needed (MySQL migration)
-            await self.trigger_initial_training()
+            # NOTE: Initial training is now handled by the main flow orchestration
+            # Do not trigger training here - wait for bootstrap collection to complete
             
-            logger.success("Trading engine initialized")
+            logger.success("Trading engine initialized (bootstrap mode)")
             
         except Exception as e:
             logger.error(f"Failed to initialize trading engine: {e}")
+            raise
+    
+    async def start_post_bootstrap_training(self):
+        """Start training and online learning after bootstrap collection completes"""
+        try:
+            logger.info("[TRAIN] Starting post-bootstrap training phase...")
+            
+            # Trigger initial ML model training
+            await self.trigger_initial_training()
+            
+            # Start online learning if training was successful
+            if self.ml_model.is_trained:
+                await self.start_online_learning()
+            
+            logger.success("[TRAIN] Post-bootstrap training phase completed")
+            
+        except Exception as e:
+            logger.error(f"[TRAIN] Post-bootstrap training failed: {e}")
             raise
     
     async def trigger_initial_training(self):
@@ -547,8 +572,239 @@ class TradingEngine:
             logger.error(f"Failed to get latest signals: {e}")
             return []
     
+    # ==================== ONLINE LEARNING & CONTINUOUS UPDATES ====================
+    
+    async def start_online_learning(self):
+        """Start continuous online learning process (Complete Pipeline Restructure)"""
+        try:
+            self.online_learning_active = True
+            self.last_retrain_time = datetime.now()
+            self.accumulated_samples = 0
+            self._schedule_next_retrain()
+            
+            logger.info("[ONLINE] Online learning activated")
+            logger.info(f"[ONLINE] Next retrain scheduled for: {self.next_retrain_time}")
+            logger.info(f"[ONLINE] Retrain triggers: {MIN_NEW_SAMPLES_FOR_RETRAIN} samples OR {ONLINE_RETRAIN_INTERVAL_SEC}s")
+            
+            # Start background tasks
+            asyncio.create_task(self._online_learning_loop())
+            asyncio.create_task(self._accuracy_update_loop())
+            
+        except Exception as e:
+            logger.error(f"[ONLINE] Failed to start online learning: {e}")
+    
+    def _schedule_next_retrain(self):
+        """Schedule the next automatic retrain"""
+        self.next_retrain_time = datetime.now() + timedelta(seconds=ONLINE_RETRAIN_INTERVAL_SEC)
+    
+    async def _online_learning_loop(self):
+        """Background loop for online learning monitoring"""
+        try:
+            while self.online_learning_active and self.running:
+                try:
+                    # Check if retrain is needed
+                    should_retrain = await self._should_trigger_retrain()
+                    
+                    if should_retrain:
+                        await self._trigger_online_retrain()
+                    
+                    # Sleep for a minute between checks
+                    await asyncio.sleep(60)
+                    
+                except Exception as e:
+                    logger.debug(f"[ONLINE] Online learning loop error: {e}")
+                    await asyncio.sleep(60)
+                    
+        except Exception as e:
+            logger.error(f"[ONLINE] Online learning loop failed: {e}")
+    
+    async def _accuracy_update_loop(self):
+        """Background loop for live accuracy updates"""
+        try:
+            while self.online_learning_active and self.running:
+                try:
+                    # Update live accuracy from recent predictions
+                    self._update_live_accuracy()
+                    self.last_accuracy_update = datetime.now()
+                    
+                    # Sleep for accuracy update interval
+                    await asyncio.sleep(ACCURACY_UPDATE_INTERVAL_SEC)
+                    
+                except Exception as e:
+                    logger.debug(f"[ONLINE] Accuracy update loop error: {e}")
+                    await asyncio.sleep(ACCURACY_UPDATE_INTERVAL_SEC)
+                    
+        except Exception as e:
+            logger.error(f"[ONLINE] Accuracy update loop failed: {e}")
+    
+    async def _should_trigger_retrain(self) -> bool:
+        """Check if automatic retrain should be triggered"""
+        try:
+            now = datetime.now()
+            
+            # Time-based trigger
+            if self.next_retrain_time and now >= self.next_retrain_time:
+                logger.info("[ONLINE] Time-based retrain trigger activated")
+                return True
+            
+            # Sample-count trigger
+            if self.accumulated_samples >= MIN_NEW_SAMPLES_FOR_RETRAIN:
+                logger.info(f"[ONLINE] Sample-count retrain trigger activated ({self.accumulated_samples} >= {MIN_NEW_SAMPLES_FOR_RETRAIN})")
+                return True
+            
+            return False
+            
+        except Exception as e:
+            logger.debug(f"[ONLINE] Error checking retrain triggers: {e}")
+            return False
+    
+    async def _trigger_online_retrain(self):
+        """Trigger an automatic online retrain"""
+        try:
+            logger.info("[ONLINE] Starting automatic online retrain...")
+            
+            # Get recent data for retraining
+            primary_symbol = 'BTCUSDT'
+            historical_data = await self.data_collector.get_historical_data(
+                primary_symbol, DEFAULT_TIMEFRAME, ML_LOOKBACK_PERIODS
+            )
+            
+            if historical_data is None or len(historical_data) < MIN_INITIAL_TRAIN_SAMPLES:
+                logger.warning(f"[ONLINE] Insufficient data for retrain ({len(historical_data) if historical_data is not None else 0} samples)")
+                self._schedule_next_retrain()  # Try again later
+                return
+            
+            # Calculate indicators
+            indicators = await self.indicator_engine.calculate_all_indicators(
+                historical_data, primary_symbol
+            )
+            
+            if not indicators:
+                logger.warning("[ONLINE] No indicators available for retrain")
+                self._schedule_next_retrain()
+                return
+            
+            # Get RFE eligible features
+            rfe_eligible = self.indicator_engine.get_rfe_eligible_indicators()
+            
+            # Perform retrain
+            retrain_success = await self.ml_model.retrain_online(indicators, primary_symbol, rfe_eligible)
+            
+            if retrain_success:
+                logger.success("[ONLINE] Online retrain completed successfully")
+                self.accumulated_samples = 0  # Reset sample counter
+                self.last_retrain_time = datetime.now()
+                self._schedule_next_retrain()
+            else:
+                logger.warning("[ONLINE] Online retrain failed")
+                # Schedule retry sooner
+                self.next_retrain_time = datetime.now() + timedelta(seconds=300)  # 5 minutes
+                
+        except Exception as e:
+            logger.error(f"[ONLINE] Online retrain failed: {e}")
+            self._schedule_next_retrain()
+    
+    def _update_live_accuracy(self):
+        """Update live accuracy and emit WebSocket event if available"""
+        try:
+            # The ML model handles its own sliding window accuracy
+            # This method can be used to trigger WebSocket updates
+            pass
+            
+        except Exception as e:
+            logger.debug(f"[ONLINE] Live accuracy update error: {e}")
+    
+    def increment_sample_count(self, count: int = 1):
+        """Increment the accumulated sample count for retrain trigger"""
+        self.accumulated_samples += count
+    
+    async def manual_retrain(self, retrain_type: str = "fast") -> Dict[str, Any]:
+        """Manually trigger a retrain (Complete Pipeline Restructure)"""
+        try:
+            if retrain_type == "full":
+                return {
+                    "success": False,
+                    "message": "Full retrain cycle (re-bootstrap) not implemented yet",
+                    "error": "NOT_IMPLEMENTED"
+                }
+            
+            # Fast retrain on accumulated data
+            logger.info("[RETRAIN] Manual fast retrain triggered...")
+            
+            # Get recent data
+            primary_symbol = 'BTCUSDT'
+            historical_data = await self.data_collector.get_historical_data(
+                primary_symbol, DEFAULT_TIMEFRAME, ML_LOOKBACK_PERIODS
+            )
+            
+            if historical_data is None or len(historical_data) < MIN_INITIAL_TRAIN_SAMPLES:
+                return {
+                    "success": False,
+                    "message": f"Insufficient data for retrain ({len(historical_data) if historical_data is not None else 0} samples)",
+                    "error": "INSUFFICIENT_DATA"
+                }
+            
+            # Calculate indicators
+            indicators = await self.indicator_engine.calculate_all_indicators(
+                historical_data, primary_symbol
+            )
+            
+            if not indicators:
+                return {
+                    "success": False,
+                    "message": "No indicators available for retrain",
+                    "error": "NO_INDICATORS"
+                }
+            
+            # Get RFE eligible features
+            rfe_eligible = self.indicator_engine.get_rfe_eligible_indicators()
+            
+            # Perform retrain
+            retrain_success = await self.ml_model.retrain_online(indicators, primary_symbol, rfe_eligible)
+            
+            if retrain_success:
+                # Reset counters
+                self.accumulated_samples = 0
+                self.last_retrain_time = datetime.now()
+                self._schedule_next_retrain()
+                
+                return {
+                    "success": True,
+                    "message": "Manual retrain completed successfully",
+                    "model_version": self.ml_model.model_version,
+                    "training_count": self.ml_model.training_count
+                }
+            else:
+                return {
+                    "success": False,
+                    "message": "Manual retrain failed during training",
+                    "error": "TRAINING_FAILED"
+                }
+                
+        except Exception as e:
+            logger.error(f"[RETRAIN] Manual retrain failed: {e}")
+            return {
+                "success": False,
+                "message": f"Manual retrain failed: {str(e)}",
+                "error": "EXCEPTION"
+            }
+    
+    def get_online_learning_status(self) -> Dict[str, Any]:
+        """Get online learning status information"""
+        return {
+            "active": self.online_learning_active,
+            "last_retrain_time": self.last_retrain_time.isoformat() if self.last_retrain_time else None,
+            "next_retrain_time": self.next_retrain_time.isoformat() if self.next_retrain_time else None,
+            "accumulated_samples": self.accumulated_samples,
+            "min_samples_for_retrain": MIN_NEW_SAMPLES_FOR_RETRAIN,
+            "retrain_interval_sec": ONLINE_RETRAIN_INTERVAL_SEC,
+            "last_accuracy_update": self.last_accuracy_update.isoformat() if self.last_accuracy_update else None
+        }
+    
+    # ==================== END ONLINE LEARNING ====================
+    
     def get_system_status(self) -> Dict[str, Any]:
-        """Get system status for web interface"""
+        """Get comprehensive system status for web interface (Complete Pipeline Restructure)"""
         try:
             # Model info
             model_info = self.ml_model.get_model_info()
@@ -567,21 +823,71 @@ class TradingEngine:
                     'data_quality': analysis['data_quality']
                 }
             
+            # Get bootstrap collection status
+            collection_status = self.data_collector.get_bootstrap_status()
+            
+            # Get indicators summary
+            indicators_summary = self.indicator_engine.get_indicators_summary()
+            
+            # Get database backend info
+            backend_info = {}
+            try:
+                from src.database.db_manager import db_manager
+                backend_info = db_manager.get_backend_info()
+            except Exception:
+                backend_info = {"error": "Database manager not available"}
+            
+            # Get online learning status
+            online_learning_status = self.get_online_learning_status()
+            
             return {
+                # Core system status
                 'system_running': self.running,
                 'demo_mode': DEMO_MODE,
                 'supported_pairs': SUPPORTED_PAIRS,
                 'confidence_threshold': CONFIDENCE_THRESHOLD,
+                'timestamp': datetime.now().isoformat(),
+                
+                # Bootstrap collection status (Complete Pipeline Restructure)
+                'collection': collection_status,
+                
+                # Training status with enhanced fields (Complete Pipeline Restructure)
+                'training': {
+                    'phase': model_info.get('current_training_stage', 'idle'),
+                    'progress_percent': model_info.get('training_progress', 0.0),
+                    'last_training_error': model_info.get('last_training_error'),
+                    'last_accuracy': model_info.get('last_accuracy', 0.0),
+                    'accuracy_live': model_info.get('accuracy_live', 0.0),
+                    'model_version': model_info.get('model_version', 1),
+                    'training_count': model_info.get('training_count', 0),
+                    'class_distribution': model_info.get('class_distribution', {}),
+                    'class_weights': model_info.get('class_weights', {}),
+                    'selected_feature_count': model_info.get('selected_feature_count', 0),
+                    'last_training_time': model_info.get('last_training_time'),
+                    'next_retrain_at': online_learning_status.get('next_retrain_time'),
+                    'accuracy_window_stats': model_info.get('accuracy_window_stats', {}),
+                    'training_progress_info': model_info.get('training_progress_info', {})
+                },
+                
+                # Indicators status (Complete Pipeline Restructure)
+                'indicators': indicators_summary,
+                
+                # Database backend info (Complete Pipeline Restructure)
+                'backend': backend_info,
+                
+                # Online learning status
+                'online_learning': online_learning_status,
+                
+                # Legacy fields for backward compatibility
                 'model': model_info,
                 'portfolio': portfolio,
                 'latest_signals': self.get_latest_signals(10),
-                'recent_analysis': recent_analysis,
-                'timestamp': datetime.now().isoformat()
+                'recent_analysis': recent_analysis
             }
             
         except Exception as e:
             logger.error(f"Failed to get system status: {e}")
-            return {}
+            return {'error': str(e), 'timestamp': datetime.now().isoformat()}
     
     async def check_and_retry_training(self):
         """Check if training retry should be attempted and execute if needed"""

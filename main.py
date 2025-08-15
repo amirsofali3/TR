@@ -186,6 +186,15 @@ class TradingSystem:
             logger.error(f"Failed to start web application: {e}")
             raise
     
+    def create_app(self, data_collector=None, indicator_engine=None, ml_model=None, trading_engine=None):
+        """Create the Flask app (used for testing)"""
+        return create_app(
+            data_collector=data_collector,
+            indicator_engine=indicator_engine, 
+            ml_model=ml_model,
+            trading_engine=trading_engine
+        )
+    
     async def run_trading_loop(self):
         """Main trading loop"""
         logger.info("🔄 Starting main trading loop...")
@@ -220,18 +229,41 @@ class TradingSystem:
                 await asyncio.sleep(5)  # Wait before retrying
     
     async def validate_system_requirements(self):
-        """Validate system requirements before startup"""
+        """Validate system requirements before startup (Complete Pipeline Restructure)"""
         logger.info("🔧 Validating system requirements...")
         
-        # Check if data directory exists and is writable
-        data_dir = os.path.dirname(DATABASE_URL.replace("sqlite:///", ""))
-        if data_dir and not os.path.exists(data_dir):
-            try:
-                os.makedirs(data_dir, exist_ok=True)
-                logger.info(f"✅ Created data directory: {data_dir}")
-            except Exception as e:
-                logger.error(f"❌ Cannot create data directory {data_dir}: {e}")
-                raise
+        # Check MySQL enforcement first
+        try:
+            from src.database.db_manager import db_manager
+            backend_info = db_manager.get_backend_info()
+            
+            logger.info(f"[DB] Database backend: {backend_info.get('db_engine', 'unknown')}")
+            
+            if backend_info.get('db_engine') == 'mysql':
+                logger.info(f"[DB] MySQL connection: {backend_info.get('mysql_host')}:{backend_info.get('mysql_port')}")
+                logger.info(f"[DB] MySQL database: {backend_info.get('mysql_database')}")
+            else:
+                logger.info(f"[DB] SQLite path: {backend_info.get('sqlite_path')}")
+            
+            if backend_info.get('force_mysql_only'):
+                logger.info("[DB] MySQL-only mode enforced")
+            else:
+                logger.info("[DB] MySQL fallback mode enabled")
+                
+        except Exception as e:
+            logger.error(f"[DB] Database validation failed: {e}")
+            raise
+        
+        # Check if data directory exists and is writable (for SQLite fallback)
+        if backend_info.get('db_engine') == 'sqlite':
+            data_dir = os.path.dirname(DATABASE_URL.replace("sqlite:///", ""))
+            if data_dir and not os.path.exists(data_dir):
+                try:
+                    os.makedirs(data_dir, exist_ok=True)
+                    logger.info(f"✅ Created data directory: {data_dir}")
+                except Exception as e:
+                    logger.error(f"❌ Cannot create data directory {data_dir}: {e}")
+                    raise
         
         # Check if logs directory exists
         log_dir = os.path.dirname(LOG_FILE)
@@ -245,11 +277,22 @@ class TradingSystem:
         
         # Test database connection
         try:
-            import sqlite3
-            db_path = DATABASE_URL.replace("sqlite:///", "")
-            conn = sqlite3.connect(db_path)
-            conn.close()
-            logger.info("✅ Database connection test passed")
+            if backend_info.get('db_engine') == 'mysql':
+                # Test MySQL connection
+                from src.database.db_manager import db_manager
+                with db_manager.get_cursor() as cursor:
+                    cursor.execute("SELECT 1")
+                    result = cursor.fetchone()
+                    if result:
+                        logger.info("✅ MySQL database connection test passed")
+            else:
+                # Test SQLite connection
+                import sqlite3
+                db_path = DATABASE_URL.replace("sqlite:///", "")
+                conn = sqlite3.connect(db_path)
+                conn.close()
+                logger.info("✅ SQLite database connection test passed")
+                
         except Exception as e:
             logger.error(f"❌ Database connection test failed: {e}")
             raise
@@ -257,37 +300,161 @@ class TradingSystem:
         logger.success("✅ System requirements validation passed")
 
     async def start(self):
-        """Start the trading system"""
+        """Start the trading system with Complete Pipeline Restructure flow"""
         try:
-            logger.info("🚀 Starting Crypto Trading AI System...")
-            logger.info(f"📋 Configuration: {len(SUPPORTED_PAIRS)} pairs, {UPDATE_INTERVAL}s interval, {'DEMO' if DEMO_MODE else 'LIVE'} mode")
+            logger.info("🚀 Starting Crypto Trading AI System (Complete Pipeline Restructure)...")
+            logger.info(f"📋 Configuration: {len(SUPPORTED_PAIRS)} pairs, {INITIAL_COLLECTION_DURATION_SEC}s bootstrap, {'DEMO' if DEMO_MODE else 'LIVE'} mode")
             
-            # Validate system requirements
+            # Phase 1: System Requirements & Database Validation
+            logger.info("[BOOTSTRAP] Phase 1: System validation...")
             await self.validate_system_requirements()
             
-            # Initialize all components
+            # Phase 2: Component Initialization (Web First!)
+            logger.info("[BOOTSTRAP] Phase 2: Component initialization...")
             await self.initialize_components()
             
-            # Start web application
-            logger.info("🌐 Starting web application...")
+            # Phase 3: Start Web Application FIRST
+            logger.info("[BOOTSTRAP] Phase 3: Starting web panel...")
             await self.start_web_app()
             
-            # Set running flag
+            # Set running flag for web app
             self.running = True
             
-            logger.success("🎉 System startup completed successfully!")
-            logger.info("📊 Beginning market analysis...")
+            logger.success("🌐 Web application started - accessible at http://{WEB_HOST}:{WEB_PORT}")
+            logger.info("[BOOTSTRAP] System ready for bootstrap data collection...")
             
-            # Start trading loop
+            # Phase 4: Bootstrap Data Collection
+            logger.info("[BOOTSTRAP] Phase 4: Starting bootstrap data collection...")
+            bootstrap_success = await self.run_bootstrap_collection()
+            
+            if not bootstrap_success:
+                logger.error("[BOOTSTRAP] Bootstrap collection failed - starting with limited functionality")
+                # Continue anyway but with warnings
+            
+            # Phase 5: Indicator Preparation (After Collection)
+            logger.info("[BOOTSTRAP] Phase 5: Preparing indicators...")
+            await self.prepare_indicators()
+            
+            # Phase 6: Model Training (After Indicators)
+            logger.info("[BOOTSTRAP] Phase 6: Starting model training...")
+            await self.run_initial_training()
+            
+            # Phase 7: Start Trading & Online Learning
+            logger.info("[BOOTSTRAP] Phase 7: Starting trading operations...")
+            await self.start_trading_operations()
+            
+            logger.success("🎉 Complete Pipeline Restructure startup completed successfully!")
+            logger.info("[BOOTSTRAP] System fully operational - all phases complete")
+            
+            # Start main trading loop
             await self.run_trading_loop()
             
         except Exception as e:
             logger.error(f"❌ Failed to start trading system: {e}")
             logger.error("💡 Common solutions:")
             logger.error("   1. Install missing packages: pip install -r requirements.txt") 
-            logger.error("   2. Check API key configuration in config/settings.py")
-            logger.error("   3. Ensure database directory is writable")
+            logger.error("   2. Check MySQL configuration (MYSQL_HOST, MYSQL_USER, etc.)")
+            logger.error("   3. Ensure FORCE_MYSQL_ONLY=False if MySQL not available")
             raise
+    
+    # ==================== COMPLETE PIPELINE RESTRUCTURE PHASES ====================
+    
+    async def run_bootstrap_collection(self) -> bool:
+        """Run the bootstrap data collection phase"""
+        try:
+            logger.info(f"[COLLECT] Starting {INITIAL_COLLECTION_DURATION_SEC}s bootstrap collection...")
+            
+            # Start bootstrap collection
+            collection_success = await self.data_collector.start_bootstrap_collection(
+                duration=INITIAL_COLLECTION_DURATION_SEC
+            )
+            
+            if collection_success:
+                logger.success(f"[COLLECT] Bootstrap collection completed successfully")
+                return True
+            else:
+                logger.warning(f"[COLLECT] Bootstrap collection failed or incomplete")
+                return False
+                
+        except Exception as e:
+            logger.error(f"[COLLECT] Bootstrap collection phase failed: {e}")
+            return False
+    
+    async def prepare_indicators(self):
+        """Prepare indicators after bootstrap collection"""
+        try:
+            logger.info("[INDICATORS] Loading and parsing encyclopedia...")
+            
+            # The indicator engine was already initialized, but let's get a summary
+            indicators_summary = self.indicator_engine.get_indicators_summary()
+            
+            logger.info(f"[INDICATORS] Encyclopedia summary:")
+            logger.info(f"[INDICATORS]   - Total defined: {indicators_summary.get('total_defined', 0)}")
+            logger.info(f"[INDICATORS]   - Must keep: {indicators_summary.get('must_keep_count', 0)}")
+            logger.info(f"[INDICATORS]   - RFE candidates: {indicators_summary.get('rfe_candidate_count', 0)}")
+            logger.info(f"[INDICATORS]   - Computed: {indicators_summary.get('computed_count', 0)}")
+            
+            skipped = indicators_summary.get('skipped', [])
+            if skipped:
+                logger.info(f"[INDICATORS] Skipped {len(skipped)} indicators:")
+                for skip in skipped[:5]:  # Show first 5
+                    logger.info(f"[INDICATORS]   - {skip['name']}: {skip['reason']}")
+                if len(skipped) > 5:
+                    logger.info(f"[INDICATORS]   - ... and {len(skipped) - 5} more")
+            
+            logger.success("[INDICATORS] Indicator preparation completed")
+            
+        except Exception as e:
+            logger.error(f"[INDICATORS] Indicator preparation failed: {e}")
+            raise
+    
+    async def run_initial_training(self):
+        """Run the initial model training after bootstrap collection"""
+        try:
+            logger.info("[TRAIN] Starting initial model training phase...")
+            
+            # Start post-bootstrap training
+            await self.trading_engine.start_post_bootstrap_training()
+            
+            # Check if training was successful
+            if self.ml_model.is_trained:
+                logger.success(f"[TRAIN] Initial training completed successfully")
+                logger.info(f"[TRAIN] Model version: {self.ml_model.model_version}")
+                logger.info(f"[TRAIN] Training accuracy: {self.ml_model.model_performance.get('accuracy', 0.0):.4f}")
+                logger.info(f"[TRAIN] Selected features: {self.ml_model.selected_feature_count}")
+            else:
+                logger.warning("[TRAIN] Initial training failed - using fallback signals")
+                logger.info("[TRAIN] System will continue with technical indicator fallbacks")
+            
+        except Exception as e:
+            logger.error(f"[TRAIN] Initial training phase failed: {e}")
+            # Don't raise - continue with fallback functionality
+            logger.warning("[TRAIN] Continuing with fallback functionality")
+    
+    async def start_trading_operations(self):
+        """Start trading operations and online learning"""
+        try:
+            logger.info("[ONLINE] Starting trading operations...")
+            
+            # Start online learning if model is trained
+            if self.ml_model.is_trained:
+                online_learning_status = self.trading_engine.get_online_learning_status()
+                if online_learning_status.get('active'):
+                    logger.info("[ONLINE] Online learning already active")
+                else:
+                    logger.info("[ONLINE] Starting online learning system...")
+                    # Online learning should have been started by start_post_bootstrap_training
+            else:
+                logger.info("[ONLINE] Model not trained - skipping online learning")
+            
+            logger.success("[ONLINE] Trading operations started")
+            
+        except Exception as e:
+            logger.error(f"[ONLINE] Failed to start trading operations: {e}")
+            # Don't raise - basic functionality should still work
+            logger.warning("[ONLINE] Continuing with basic trading functionality")
+    
+    # ==================== END COMPLETE PIPELINE RESTRUCTURE PHASES ====================
     
     async def stop(self):
         """Stop the trading system"""
