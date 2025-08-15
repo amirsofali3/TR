@@ -107,6 +107,101 @@
                     </div>
                 </div>
 
+                <!-- Indicator Progress Card (User Feedback Adjustments) -->
+                <div class="card mb-4">
+                    <div class="card-header">
+                        <h5><i class="fas fa-cogs me-2"></i>Indicator Computation Progress</h5>
+                    </div>
+                    <div class="card-body">
+                        <div class="mb-3">
+                            <label class="form-label">Progress</label>
+                            <div class="progress mb-2" style="height: 20px;">
+                                <div id="indicator-progress-bar" class="progress-bar bg-info" role="progressbar" style="width: 0%" aria-valuenow="0" aria-valuemin="0" aria-valuemax="100">0%</div>
+                            </div>
+                            <small class="text-muted">
+                                Phase: <span id="indicator-phase">loading</span> | 
+                                Computed: <span id="indicator-computed">0</span>/<span id="indicator-total">0</span>
+                                <span id="indicator-skipped-info" class="text-warning ms-2" style="display:none;">
+                                    (Skipped: <span id="indicator-skipped-count">0</span>)
+                                </span>
+                            </small>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Feature Selection Summary Card (User Feedback Adjustments) -->
+                <div class="card mb-4">
+                    <div class="card-header d-flex justify-content-between align-items-center">
+                        <h5><i class="fas fa-filter me-2"></i>Feature Selection Summary</h5>
+                        <button id="view-all-features-btn" class="btn btn-outline-primary btn-sm">
+                            <i class="fas fa-eye me-1"></i>View All
+                        </button>
+                    </div>
+                    <div class="card-body">
+                        <div class="row text-center mb-3">
+                            <div class="col-6">
+                                <div class="h3 text-success" id="selected-features-count">0</div>
+                                <small class="text-muted">Selected Features</small>
+                            </div>
+                            <div class="col-6">
+                                <div class="h3 text-muted" id="inactive-features-count">0</div>
+                                <small class="text-muted">Inactive Features</small>
+                            </div>
+                        </div>
+                        <div id="features-summary-lists" style="display:none;">
+                            <div class="mb-2">
+                                <h6 class="text-success">Selected Features (Top 10)</h6>
+                                <div id="selected-features-preview" class="small" style="max-height: 100px; overflow-y: auto;">
+                                    Loading...
+                                </div>
+                            </div>
+                            <div>
+                                <h6 class="text-muted">Inactive Features (Top 10)</h6>
+                                <div id="inactive-features-preview" class="small" style="max-height: 100px; overflow-y: auto;">
+                                    Loading...
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Analysis Configuration Card (User Feedback Adjustments) -->
+                <div class="card mb-4">
+                    <div class="card-header">
+                        <h5><i class="fas fa-clock me-2"></i>Analysis Configuration</h5>
+                    </div>
+                    <div class="card-body">
+                        <div class="mb-3">
+                            <label for="analysis-interval-select" class="form-label">Analysis Interval</label>
+                            <div class="row">
+                                <div class="col-8">
+                                    <select id="analysis-interval-select" class="form-select">
+                                        <option value="1">1 second</option>
+                                        <option value="5" selected>5 seconds</option>
+                                        <option value="10">10 seconds</option>
+                                        <option value="15">15 seconds</option>
+                                        <option value="30">30 seconds</option>
+                                        <option value="60">60 seconds</option>
+                                    </select>
+                                </div>
+                                <div class="col-4">
+                                    <button id="change-interval-btn" class="btn btn-primary btn-sm">
+                                        <i class="fas fa-sync me-1"></i>Apply
+                                    </button>
+                                </div>
+                            </div>
+                            <small class="text-muted">Raw collection: 1s (fixed)</small>
+                        </div>
+                        
+                        <div class="mb-3">
+                            <button id="retrain-btn" class="btn btn-warning">
+                                <i class="fas fa-redo me-2"></i>Retrain Model (Fast)
+                            </button>
+                            <small class="d-block text-muted mt-1">Uses existing MySQL data only</small>
+                        </div>
+                    </div>
+                </div>
+
                 <!-- Recent Signals Card -->
                 <div class="card mb-4">
                     <div class="card-header">
@@ -185,6 +280,46 @@
                     <div class="card-body">
                         <div id="positions-list">
                             <div class="text-center text-muted">No active positions</div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Accuracy Metrics Card (User Feedback Adjustments) -->
+                <div class="card mb-4">
+                    <div class="card-header">
+                        <h5><i class="fas fa-bullseye me-2"></i>Accuracy Metrics</h5>
+                    </div>
+                    <div class="card-body">
+                        <div class="mb-3">
+                            <div class="row">
+                                <div class="col-6">
+                                    <label class="form-label">Initial Accuracy</label>
+                                    <div id="accuracy-initial" class="h4 text-primary">0.000</div>
+                                </div>
+                                <div class="col-6">
+                                    <label class="form-label">Live Accuracy</label>
+                                    <div id="accuracy-live" class="h4 text-success">0.000</div>
+                                </div>
+                            </div>
+                        </div>
+                        
+                        <div class="mb-3">
+                            <label class="form-label">Sliding Window</label>
+                            <div class="progress mb-1" style="height: 6px;">
+                                <div id="accuracy-window-progress" class="progress-bar bg-info" role="progressbar" style="width: 0%"></div>
+                            </div>
+                            <small class="text-muted">
+                                Samples: <span id="accuracy-window-count">0</span>/<span id="accuracy-window-size">1000</span>
+                                <span id="accuracy-warming-badge" class="badge bg-warning ms-2">Warming Up</span>
+                            </small>
+                        </div>
+                        
+                        <div class="text-muted small">
+                            <i class="fas fa-clock me-1"></i>
+                            Last updated: <span id="accuracy-last-updated">Never</span>
+                            <br>
+                            <i class="fas fa-sync me-1"></i>
+                            Update interval: <span id="accuracy-update-interval">60s</span>
                         </div>
                     </div>
                 </div>
