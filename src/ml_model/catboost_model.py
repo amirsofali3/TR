@@ -55,6 +55,26 @@ class CatBoostTradingModel:
         self.next_retry_at = None
         self.class_weights = {}
         
+        # Complete Pipeline Restructure additions
+        self.training_stages = [
+            'sanitizing',
+            'building', 
+            'feature_selection',
+            'fitting',
+            'validating',
+            'finalizing'
+        ]
+        self.current_training_stage = None
+        self.stage_progress = 0.0
+        self.overall_training_progress = 0.0
+        
+        # Sliding window accuracy tracking
+        self.recent_predictions = []  # Store recent (prediction, actual) tuples
+        self.accuracy_window_size = ACCURACY_SLIDING_WINDOW
+        self.accuracy_live = 0.0
+        self.model_version = 1
+        self.training_count = 0
+        
         # Initialize feature weights (active=1.0, inactive=0.01)
         self.active_weight = ACTIVE_FEATURE_WEIGHT
         self.inactive_weight = INACTIVE_FEATURE_WEIGHT
@@ -474,17 +494,26 @@ class CatBoostTradingModel:
         logger.info(f"Setup weights: {len(selected_features)} active, {len(all_features) - len(selected_features)} inactive")
     
     async def train_model(self, X: pd.DataFrame, y: pd.Series, rfe_eligible_features: List[str]):
-        """Train the CatBoost model with feature selection and class weights"""
+        """Train the CatBoost model with staged progress and enhanced diagnostics (Complete Pipeline Restructure)"""
         try:
-            logger.info("Starting model training...")
-            self.training_progress = 0
-            self.last_training_error = None  # Reset error
+            logger.info("[TRAIN] Starting model training with staged progress...")
+            
+            # Initialize training progress
+            self.overall_training_progress = 0.0
+            self.current_training_stage = None
+            self.last_training_error = None
+            self.training_count += 1
+            training_start_time = datetime.now()
             
             if len(X) == 0 or len(y) == 0:
                 error_msg = "No training data available"
-                logger.error(error_msg)
+                logger.error(f"[TRAIN] {error_msg}")
                 self.last_training_error = error_msg
                 return False
+            
+            # Stage 1: Sanitizing (0-15%)
+            self.current_training_stage = 'sanitizing'
+            logger.info("[TRAIN] Stage 1/6: Data sanitization...")
             
             # Encode labels and calculate class distribution
             y_encoded = self.label_encoder.fit_transform(y)
@@ -503,17 +532,28 @@ class CatBoostTradingModel:
             
             logger.info(f"[TRAIN] Class distribution: {self.class_distribution}")
             logger.info(f"[TRAIN] Class weights: {self.class_weights}")
+            self.overall_training_progress = 15.0
+            
+            # Stage 2: Building (15-30%)
+            self.current_training_stage = 'building'
+            logger.info("[TRAIN] Stage 2/6: Building training/test split...")
             
             # Split data
             X_train, X_test, y_train, y_test = train_test_split(
                 X, y_encoded, test_size=0.2, random_state=42, stratify=y_encoded
             )
             
-            self.training_progress = 5
+            logger.info(f"[TRAIN] Train samples: {len(X_train)}, Test samples: {len(X_test)}")
+            self.overall_training_progress = 30.0
             
-            # Perform RFE feature selection
+            # Stage 3: Feature Selection (30-50%)
+            self.current_training_stage = 'feature_selection'
+            logger.info("[TRAIN] Stage 3/6: Feature selection...")
+            
+            # Perform RFE feature selection with progress tracking
             selected_features = await self.perform_rfe_selection(X_train, y_train, rfe_eligible_features)
             self.selected_features = selected_features
+            self.selected_feature_count = len(selected_features)
             
             # Setup feature weights
             self.setup_feature_weights(selected_features, list(X.columns))
@@ -522,32 +562,63 @@ class CatBoostTradingModel:
             X_train_selected = X_train[selected_features]
             X_test_selected = X_test[selected_features]
             
-            self.training_progress = 50
+            logger.info(f"[TRAIN] Selected {len(selected_features)} features")
+            self.overall_training_progress = 50.0
+            
+            # Stage 4: Fitting (50-80%)
+            self.current_training_stage = 'fitting'
+            logger.info("[TRAIN] Stage 4/6: Model fitting...")
             
             # Train the main model with class weights
-            logger.info("Training main CatBoost model...")
+            logger.info("[TRAIN] Training main CatBoost model...")
             
-            # Convert class weights to CatBoost format
-            # CatBoost expects weights as a list indexed by encoded label
-            class_weight_list = []
+            # Convert class weights to CatBoost format - fix class_weights parameter issue
+            # CatBoost expects class_weights parameter in constructor, not fit method
+            catboost_class_weights = {}
             for encoded_label in range(len(unique_classes)):
                 original_label = self.label_encoder.inverse_transform([encoded_label])[0]
-                class_weight_list.append(self.class_weights[original_label])
+                catboost_class_weights[encoded_label] = self.class_weights[original_label]
+            
+            logger.info(f"[TRAIN] CatBoost class weights: {catboost_class_weights}")
+            
+            # Create a new model instance with class weights in constructor
+            self.model = CatBoostClassifier(
+                iterations=CATBOOST_ITERATIONS,
+                depth=CATBOOST_DEPTH,
+                learning_rate=CATBOOST_LEARNING_RATE,
+                loss_function='MultiClass',
+                eval_metric='MultiClass',
+                random_seed=42,
+                logging_level='Silent',
+                bootstrap_type='Bayesian',
+                bagging_temperature=1.0,
+                colsample_bylevel=0.8,
+                reg_lambda=3.0,
+                thread_count=-1,
+                use_best_model=True,
+                early_stopping_rounds=50,
+                class_weights=catboost_class_weights  # Set in constructor
+            )
             
             # Use validation set for early stopping
             X_train_final, X_val, y_train_final, y_val = train_test_split(
                 X_train_selected, y_train, test_size=0.2, random_state=42
             )
             
+            logger.info(f"[TRAIN] Fitting model with {len(X_train_final)} training samples...")
             self.model.fit(
                 X_train_final, y_train_final,
                 eval_set=(X_val, y_val),
                 verbose=False,
-                plot=False,
-                class_weights=class_weight_list
+                plot=False
+                # class_weights removed from fit() call - now in constructor
             )
             
-            self.training_progress = 80
+            self.overall_training_progress = 80.0
+            
+            # Stage 5: Validating (80-95%)
+            self.current_training_stage = 'validating'
+            logger.info("[TRAIN] Stage 5/6: Model validation...")
             
             # Evaluate model
             y_pred = self.model.predict(X_test_selected)
@@ -567,6 +638,9 @@ class CatBoostTradingModel:
                 'class_weights': self.class_weights
             }
             
+            # Initialize live accuracy with training accuracy
+            self.accuracy_live = accuracy
+            
             # Store additional diagnostics
             self.selected_feature_count = len(selected_features)
             self.numeric_feature_count = len(X.columns)
@@ -577,25 +651,36 @@ class CatBoostTradingModel:
             importance_scores = self.model.get_feature_importance()
             self.feature_importance = dict(zip(feature_names, importance_scores))
             
-            self.training_progress = 90
+            logger.info(f"[TRAIN] Validation results: Accuracy: {accuracy:.4f}, F1: {f1:.4f}")
+            self.overall_training_progress = 95.0
+            
+            # Stage 6: Finalizing (95-100%)
+            self.current_training_stage = 'finalizing'
+            logger.info("[TRAIN] Stage 6/6: Finalizing...")
             
             # Save model
             await self.save_model()
             
+            # Update model version
+            self.model_version += 1
             self.is_trained = True
-            self.training_progress = 100
+            self.current_training_stage = None
+            self.overall_training_progress = 100.0
             
-            logger.success(f"Model training completed. Accuracy: {accuracy:.4f}, F1: {f1:.4f}")
-            logger.info(f"[TRAIN] Training summary: samples={len(X_train)}, features={len(selected_features)}, " +
-                       f"selected={len(selected_features)}, accuracy={accuracy:.4f}, class_weights={self.class_weights}")
+            training_duration = (datetime.now() - training_start_time).total_seconds()
+            
+            logger.success(f"[TRAIN] Training completed successfully in {training_duration:.1f}s")
+            logger.info(f"[TRAIN] Model v{self.model_version}: Accuracy: {accuracy:.4f}, F1: {f1:.4f}")
+            logger.info(f"[TRAIN] Features: {len(selected_features)}/{len(X.columns)}, Samples: {len(X_train)}")
             
             return True
             
         except Exception as e:
             error_msg = f"Model training failed: {e}"
-            logger.error(error_msg)
+            logger.error(f"[TRAIN] {error_msg}")
             self.last_training_error = error_msg
-            self.training_progress = 0
+            self.current_training_stage = None
+            self.overall_training_progress = 0.0
             return False
     
     async def predict(self, X: pd.DataFrame) -> Dict[str, Any]:
@@ -787,11 +872,101 @@ class CatBoostTradingModel:
         except Exception as e:
             logger.warning(f"Failed to load existing model: {e}")
     
+    # ==================== SLIDING WINDOW ACCURACY TRACKING ====================
+    
+    def add_prediction_result(self, prediction: str, actual: str):
+        """Add a prediction result to the sliding window for live accuracy tracking"""
+        try:
+            # Add to recent predictions
+            self.recent_predictions.append((prediction, actual))
+            
+            # Maintain sliding window size
+            if len(self.recent_predictions) > self.accuracy_window_size:
+                self.recent_predictions = self.recent_predictions[-self.accuracy_window_size:]
+            
+            # Update live accuracy
+            self._update_live_accuracy()
+            
+        except Exception as e:
+            logger.debug(f"[ACCURACY] Failed to add prediction result: {e}")
+    
+    def _update_live_accuracy(self):
+        """Update the live accuracy based on recent predictions"""
+        try:
+            if not self.recent_predictions:
+                self.accuracy_live = 0.0
+                return
+            
+            correct_predictions = 0
+            for prediction, actual in self.recent_predictions:
+                if prediction == actual:
+                    correct_predictions += 1
+            
+            self.accuracy_live = correct_predictions / len(self.recent_predictions)
+            
+        except Exception as e:
+            logger.debug(f"[ACCURACY] Failed to update live accuracy: {e}")
+            self.accuracy_live = 0.0
+    
+    def get_live_accuracy(self) -> float:
+        """Get the current live accuracy"""
+        return self.accuracy_live
+    
+    def get_accuracy_window_stats(self) -> Dict[str, Any]:
+        """Get detailed statistics about the accuracy sliding window"""
+        try:
+            if not self.recent_predictions:
+                return {
+                    'window_size': 0,
+                    'accuracy': 0.0,
+                    'correct_predictions': 0,
+                    'total_predictions': 0
+                }
+            
+            correct = sum(1 for pred, actual in self.recent_predictions if pred == actual)
+            total = len(self.recent_predictions)
+            
+            return {
+                'window_size': total,
+                'accuracy': correct / total if total > 0 else 0.0,
+                'correct_predictions': correct,
+                'total_predictions': total,
+                'max_window_size': self.accuracy_window_size
+            }
+            
+        except Exception as e:
+            logger.debug(f"[ACCURACY] Failed to get window stats: {e}")
+            return {
+                'window_size': 0,
+                'accuracy': 0.0,
+                'correct_predictions': 0,
+                'total_predictions': 0,
+                'error': str(e)
+            }
+    
+    def get_training_progress_info(self) -> Dict[str, Any]:
+        """Get detailed training progress information (Complete Pipeline Restructure)"""
+        return {
+            'overall_progress': self.overall_training_progress,
+            'current_stage': self.current_training_stage,
+            'stages': self.training_stages,
+            'stage_descriptions': {
+                'sanitizing': 'Data sanitization and preprocessing',
+                'building': 'Building training/test splits',
+                'feature_selection': 'RFE feature selection',
+                'fitting': 'Model training and fitting',
+                'validating': 'Model validation and evaluation',
+                'finalizing': 'Saving model and cleanup'
+            }
+        }
+    
+    # ==================== END SLIDING WINDOW ACCURACY TRACKING ====================
+    
     def get_model_info(self) -> Dict[str, Any]:
-        """Get model information for web interface (Enhanced with diagnostics)"""
+        """Get model information for web interface (Complete Pipeline Restructure)"""
         return {
             'is_trained': self.is_trained,
-            'training_progress': self.training_progress,
+            'training_progress': self.overall_training_progress,  # Use new overall progress
             'model_performance': self.model_performance,
             'selected_features_count': len(self.selected_features),
             'total_features_count': len(self.feature_weights),
@@ -800,9 +975,9 @@ class CatBoostTradingModel:
             'feature_importance': self.feature_importance,
             # MySQL migration enhancements
             'fallback_active': not self.is_trained,
-            'last_training_time': self.model_performance.get('training_date', None),
+            'last_training_time': self.last_training_time.isoformat() if self.last_training_time else None,
             'samples_in_last_train': self.model_performance.get('training_samples', 0),
-            'class_distribution': self.model_performance.get('class_distribution', {}),
+            'class_distribution': self.class_distribution,
             'training_cooldown_active': (
                 self.training_cooldown_until and 
                 datetime.now() < self.training_cooldown_until
@@ -814,5 +989,13 @@ class CatBoostTradingModel:
             'selected_feature_count': self.selected_feature_count,
             'class_weights': self.class_weights,
             'sanitization': self.last_sanitization_stats,
-            'next_retry_at': self.next_retry_at.isoformat() if self.next_retry_at else None
+            'next_retry_at': self.next_retry_at.isoformat() if self.next_retry_at else None,
+            # Complete Pipeline Restructure additions
+            'model_version': self.model_version,
+            'training_count': self.training_count,
+            'current_training_stage': self.current_training_stage,
+            'accuracy_live': self.accuracy_live,
+            'last_accuracy': self.model_performance.get('accuracy', 0.0),
+            'accuracy_window_stats': self.get_accuracy_window_stats(),
+            'training_progress_info': self.get_training_progress_info()
         }
