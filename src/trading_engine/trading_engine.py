@@ -56,10 +56,16 @@ class TradingEngine:
                 return
             
             # Check if training cooldown is active
-            if (self.ml_model.training_cooldown_until and 
-                datetime.now() < self.ml_model.training_cooldown_until):
-                logger.info("Training cooldown active, skipping initial training")
+            now = datetime.now()
+            if (self.ml_model.training_cooldown_until and now < self.ml_model.training_cooldown_until):
+                remaining = self.ml_model.training_cooldown_until - now
+                logger.info(f"Training cooldown active, {remaining.total_seconds():.0f}s remaining")
                 return
+            elif self.ml_model.training_cooldown_until and now >= self.ml_model.training_cooldown_until:
+                # Cooldown expired, clear it
+                logger.info("Training cooldown expired, clearing retry scheduling")
+                self.ml_model.training_cooldown_until = None
+                self.ml_model.next_retry_at = None
             
             logger.info("ML model not trained, attempting initial training...")
             
@@ -101,20 +107,40 @@ class TradingEngine:
             
             if success:
                 logger.success("[TRAIN] Initial model training completed successfully!")
+                # Clear any previous retry scheduling
+                self.ml_model.next_retry_at = None
             else:
                 logger.warning("[TRAIN] Initial model training failed, will use fallback signals")
-                # Set cooldown to prevent immediate retry
-                self.ml_model.training_cooldown_until = datetime.now() + timedelta(minutes=TRAIN_RETRY_COOLDOWN_MIN)
+                # Set cooldown to prevent immediate retry using new configuration
+                from config.settings import TRAIN_RETRY_COOLDOWN_SEC
+                cooldown_seconds = TRAIN_RETRY_COOLDOWN_SEC
+                retry_time = datetime.now() + timedelta(seconds=cooldown_seconds)
+                
+                self.ml_model.training_cooldown_until = retry_time
+                self.ml_model.next_retry_at = retry_time
+                
+                logger.info(f"[TRAIN] Next training retry scheduled for: {retry_time.strftime('%Y-%m-%d %H:%M:%S')}")
                 
         except Exception as e:
             logger.error(f"[TRAIN] Initial training execution failed: {e}")
-            # Set cooldown on failure
-            self.ml_model.training_cooldown_until = datetime.now() + timedelta(minutes=TRAIN_RETRY_COOLDOWN_MIN)
+            # Set cooldown on failure using new configuration  
+            from config.settings import TRAIN_RETRY_COOLDOWN_SEC
+            cooldown_seconds = TRAIN_RETRY_COOLDOWN_SEC
+            retry_time = datetime.now() + timedelta(seconds=cooldown_seconds)
+            
+            self.ml_model.training_cooldown_until = retry_time
+            self.ml_model.next_retry_at = retry_time
+            
+            logger.info(f"[TRAIN] Next training retry scheduled for: {retry_time.strftime('%Y-%m-%d %H:%M:%S')}")
     
     async def analyze_markets(self):
         """Analyze all supported markets and generate signals"""
         try:
             logger.info("Starting market analysis...")
+            
+            # Check for training retry if model not trained
+            if not self.ml_model.is_trained:
+                await self.check_and_retry_training()
             
             # Get current prices first for risk management
             current_prices = {}
@@ -556,6 +582,37 @@ class TradingEngine:
         except Exception as e:
             logger.error(f"Failed to get system status: {e}")
             return {}
+    
+    async def check_and_retry_training(self):
+        """Check if training retry should be attempted and execute if needed"""
+        try:
+            if not self.ml_model or self.ml_model.is_trained:
+                return False
+            
+            now = datetime.now()
+            
+            # Check if it's time to retry
+            if (self.ml_model.next_retry_at and 
+                now >= self.ml_model.next_retry_at and
+                (not self.ml_model.training_cooldown_until or 
+                 now >= self.ml_model.training_cooldown_until)):
+                
+                logger.info("[TRAIN] Retry cooldown expired, attempting training retry...")
+                
+                # Clear retry scheduling
+                self.ml_model.next_retry_at = None
+                self.ml_model.training_cooldown_until = None
+                
+                # Attempt training retry
+                await self.attempt_initial_training()
+                
+                return True
+                
+            return False
+            
+        except Exception as e:
+            logger.error(f"[TRAIN] Retry training check failed: {e}")
+            return False
     
     async def start_trading(self):
         """Start the trading process"""
