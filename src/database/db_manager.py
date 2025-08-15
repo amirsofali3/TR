@@ -10,6 +10,9 @@ from typing import Optional, List, Dict, Any, Union
 from contextlib import contextmanager
 from loguru import logger
 
+from dotenv import load_dotenv
+load_dotenv()  # به صورت پیش‌فرض دنبال فایل .env در همان دایرکتوری فعلی می‌گردد
+
 # MySQL support (optional)
 try:
     import pymysql
