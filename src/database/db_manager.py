@@ -409,8 +409,8 @@ class DatabaseManager:
                     CREATE TABLE IF NOT EXISTS {training_runs_table} (
                         id BIGINT AUTO_INCREMENT PRIMARY KEY,
                         model_version INT NOT NULL,
-                        training_started_at TIMESTAMP NOT NULL,
-                        training_completed_at TIMESTAMP,
+                        training_started_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                        training_completed_at TIMESTAMP NULL DEFAULT NULL,
                         samples_count INT,
                         features_selected INT,
                         accuracy DECIMAL(5,4),

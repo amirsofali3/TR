@@ -77,6 +77,37 @@
                     </div>
                 </div>
 
+                <!-- Bootstrap Progress Card -->
+                <div id="bootstrap-progress-card" class="card mb-4" style="display: none;">
+                    <div class="card-header">
+                        <h5><i class="fas fa-download me-2"></i>Data Collection Progress</h5>
+                    </div>
+                    <div class="card-body">
+                        <div class="mb-3">
+                            <div class="d-flex justify-content-between align-items-center mb-2">
+                                <label class="form-label mb-0">Bootstrap Progress</label>
+                                <span id="bootstrap-progress-text" class="text-muted">Starting...</span>
+                            </div>
+                            <div class="progress">
+                                <div id="bootstrap-progress-bar" class="progress-bar progress-bar-striped progress-bar-animated bg-info" role="progressbar" style="width: 0%">0%</div>
+                            </div>
+                        </div>
+                        <div class="row">
+                            <div class="col-md-6">
+                                <small class="text-muted">
+                                    Total Records: <span id="bootstrap-total-records">0</span><br>
+                                    Elapsed: <span id="bootstrap-elapsed">0s</span> / Remaining: <span id="bootstrap-remaining">0s</span>
+                                </small>
+                            </div>
+                            <div class="col-md-6">
+                                <small class="text-muted" id="bootstrap-symbol-breakdown">
+                                    <!-- Symbol breakdown will be populated via JS -->
+                                </small>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
                 <!-- Indicators Status Card -->
                 <div class="card mb-4">
                     <div class="card-header d-flex justify-content-between align-items-center">
