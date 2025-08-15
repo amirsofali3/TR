@@ -43,6 +43,16 @@ class TradingDashboard {
                 this.handleSystemUpdate(data);
             });
             
+            // User Feedback Adjustments - New WebSocket Events
+            this.socket.on('indicator_progress', (data) => {
+                this.updateIndicatorProgress(data);
+            });
+            
+            this.socket.on('analysis_interval_changed', (data) => {
+                this.handleIntervalChange(data);
+                this.showAlert(`Analysis interval changed to ${data.new_interval_sec}s`, 'info');
+            });
+            
             this.socket.on('error', (error) => {
                 console.error('WebSocket error:', error);
                 this.showAlert('WebSocket error: ' + error.message, 'danger');
@@ -68,9 +78,21 @@ class TradingDashboard {
             this.loadInitialData();
         });
         
-        // Retrain model button
+        // Retrain model button (now always fast mode)
         document.getElementById('retrain-btn').addEventListener('click', () => {
             this.retrainModel();
+        });
+        
+        // User Feedback Adjustments - New Event Listeners
+        
+        // Analysis interval change button
+        document.getElementById('change-interval-btn').addEventListener('click', () => {
+            this.changeAnalysisInterval();
+        });
+        
+        // View all features button
+        document.getElementById('view-all-features-btn').addEventListener('click', () => {
+            this.toggleFeaturesView();
         });
         
         // Save TP/SL configuration
@@ -517,14 +539,15 @@ class TradingDashboard {
             button.disabled = true;
             button.innerHTML = '<span class="loading"></span> Retraining...';
             
-            const response = await fetch('/api/retrain_model', {
+            // User Feedback Adjustments - Use new /api/retrain endpoint (always fast)
+            const response = await fetch('/api/retrain', {
                 method: 'POST'
             });
             
             const data = await response.json();
             
-            if (response.ok) {
-                this.showAlert('Model retraining started', 'success');
+            if (response.status === 202) {
+                this.showAlert('Fast model retraining started (using existing data)', 'success');
             } else {
                 throw new Error(data.error || 'Failed to start retraining');
             }
@@ -535,9 +558,185 @@ class TradingDashboard {
         } finally {
             const button = document.getElementById('retrain-btn');
             button.disabled = false;
-            button.innerHTML = '<i class="fas fa-sync me-2"></i>Retrain Model';
+            button.innerHTML = '<i class="fas fa-redo me-2"></i>Retrain Model (Fast)';
         }
     }
+    
+    // ==================== USER FEEDBACK ADJUSTMENTS - NEW METHODS ====================
+    
+    async changeAnalysisInterval() {
+        try {
+            const select = document.getElementById('analysis-interval-select');
+            const button = document.getElementById('change-interval-btn');
+            const newInterval = parseInt(select.value);
+            
+            button.disabled = true;
+            button.innerHTML = '<span class="loading"></span> Applying...';
+            
+            const response = await fetch('/api/analysis/interval', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({ interval_sec: newInterval })
+            });
+            
+            const data = await response.json();
+            
+            if (response.ok) {
+                this.showAlert(`Analysis interval changed to ${newInterval}s`, 'success');
+            } else {
+                throw new Error(data.error || 'Failed to change interval');
+            }
+            
+        } catch (error) {
+            console.error('Failed to change analysis interval:', error);
+            this.showAlert('Failed to change analysis interval', 'danger');
+        } finally {
+            const button = document.getElementById('change-interval-btn');
+            button.disabled = false;
+            button.innerHTML = '<i class="fas fa-sync me-1"></i>Apply';
+        }
+    }
+    
+    toggleFeaturesView() {
+        const summaryDiv = document.getElementById('features-summary-lists');
+        const button = document.getElementById('view-all-features-btn');
+        
+        if (summaryDiv.style.display === 'none') {
+            this.loadFeatures();
+            summaryDiv.style.display = 'block';
+            button.innerHTML = '<i class="fas fa-eye-slash me-1"></i>Hide';
+        } else {
+            summaryDiv.style.display = 'none';
+            button.innerHTML = '<i class="fas fa-eye me-1"></i>View All';
+        }
+    }
+    
+    async loadFeatures() {
+        try {
+            const response = await fetch('/api/features');
+            const data = await response.json();
+            
+            if (response.ok) {
+                this.updateFeaturesPreview(data);
+            } else {
+                throw new Error(data.error || 'Failed to load features');
+            }
+            
+        } catch (error) {
+            console.error('Failed to load features:', error);
+            document.getElementById('selected-features-preview').innerHTML = 'Error loading features';
+            document.getElementById('inactive-features-preview').innerHTML = 'Error loading features';
+        }
+    }
+    
+    updateFeaturesPreview(data) {
+        const selectedDiv = document.getElementById('selected-features-preview');
+        const inactiveDiv = document.getElementById('inactive-features-preview');
+        
+        // Update selected features preview (top 10)
+        if (data.selected && data.selected.length > 0) {
+            const selectedItems = data.selected.slice(0, 10).map(feature => 
+                `<div class="mb-1"><span class="badge bg-light text-dark me-1">${feature.importance.toFixed(3)}</span>${feature.name}</div>`
+            ).join('');
+            selectedDiv.innerHTML = selectedItems;
+            if (data.selected.length > 10) {
+                selectedDiv.innerHTML += `<div class="text-muted">... and ${data.selected.length - 10} more</div>`;
+            }
+        } else {
+            selectedDiv.innerHTML = '<div class="text-muted">No selected features</div>';
+        }
+        
+        // Update inactive features preview (top 10)
+        if (data.inactive && data.inactive.length > 0) {
+            const inactiveItems = data.inactive.slice(0, 10).map(feature => 
+                `<div class="mb-1"><span class="badge bg-light text-muted me-1">${feature.importance.toFixed(3)}</span>${feature.name}</div>`
+            ).join('');
+            inactiveDiv.innerHTML = inactiveItems;
+            if (data.inactive.length > 10) {
+                inactiveDiv.innerHTML += `<div class="text-muted">... and ${data.inactive.length - 10} more</div>`;
+            }
+        } else {
+            inactiveDiv.innerHTML = '<div class="text-muted">No inactive features</div>';
+        }
+    }
+    
+    updateIndicatorProgress(data) {
+        const progressBar = document.getElementById('indicator-progress-bar');
+        const phaseSpan = document.getElementById('indicator-phase');
+        const computedSpan = document.getElementById('indicator-computed');
+        const totalSpan = document.getElementById('indicator-total');
+        const skippedInfo = document.getElementById('indicator-skipped-info');
+        const skippedCount = document.getElementById('indicator-skipped-count');
+        
+        if (progressBar) {
+            progressBar.style.width = `${data.percent}%`;
+            progressBar.textContent = `${data.percent}%`;
+            progressBar.setAttribute('aria-valuenow', data.percent);
+        }
+        
+        if (phaseSpan) phaseSpan.textContent = data.phase;
+        if (computedSpan) computedSpan.textContent = data.computed_count;
+        if (totalSpan) totalSpan.textContent = data.total_defined;
+        
+        if (data.skipped_count > 0) {
+            skippedInfo.style.display = 'inline';
+            skippedCount.textContent = data.skipped_count;
+        } else {
+            skippedInfo.style.display = 'none';
+        }
+    }
+    
+    handleIntervalChange(data) {
+        // Update the UI to reflect the interval change
+        const select = document.getElementById('analysis-interval-select');
+        if (select) {
+            select.value = data.new_interval_sec.toString();
+        }
+    }
+    
+    updateAccuracyMetrics(data) {
+        const initialAccuracy = document.getElementById('accuracy-initial');
+        const liveAccuracy = document.getElementById('accuracy-live');
+        const windowProgress = document.getElementById('accuracy-window-progress');
+        const windowCount = document.getElementById('accuracy-window-count');
+        const windowSize = document.getElementById('accuracy-window-size');
+        const warmingBadge = document.getElementById('accuracy-warming-badge');
+        const lastUpdated = document.getElementById('accuracy-last-updated');
+        const updateInterval = document.getElementById('accuracy-update-interval');
+        
+        if (data.training) {
+            const training = data.training;
+            
+            if (initialAccuracy) initialAccuracy.textContent = (training.last_accuracy || 0).toFixed(3);
+            if (liveAccuracy) liveAccuracy.textContent = (training.accuracy_live || 0).toFixed(3);
+            
+            if (windowSize) windowSize.textContent = training.accuracy_window_size || 1000;
+            if (windowCount) windowCount.textContent = training.accuracy_live_count || 0;
+            
+            // Update progress bar
+            if (windowProgress) {
+                const windowPercent = Math.min((training.accuracy_live_count || 0) / (training.accuracy_window_size || 1000) * 100, 100);
+                windowProgress.style.width = `${windowPercent}%`;
+            }
+            
+            // Show/hide warming up badge
+            if (warmingBadge) {
+                if (training.accuracy_warming_up) {
+                    warmingBadge.style.display = 'inline';
+                } else {
+                    warmingBadge.style.display = 'none';
+                }
+            }
+            
+            if (lastUpdated) lastUpdated.textContent = new Date().toLocaleTimeString();
+        }
+        
+        if (updateInterval) updateInterval.textContent = '60s';
+    }
+    
+    // ==================== END USER FEEDBACK ADJUSTMENTS ====================
     
     handleSystemUpdate(data) {
         // Handle real-time system updates via WebSocket
@@ -550,6 +749,23 @@ class TradingDashboard {
         if (data.latest_signals) {
             this.updateSignals(data.latest_signals);
         }
+        
+        // User Feedback Adjustments - Update new UI elements
+        if (data.indicator_progress) {
+            this.updateIndicatorProgress(data.indicator_progress);
+        }
+        
+        if (data.training && data.training.features) {
+            // Update feature counts
+            const selectedCount = document.getElementById('selected-features-count');
+            const inactiveCount = document.getElementById('inactive-features-count');
+            
+            if (selectedCount) selectedCount.textContent = data.training.features.counts.selected || 0;
+            if (inactiveCount) inactiveCount.textContent = data.training.features.counts.inactive || 0;
+        }
+        
+        // Update accuracy metrics
+        this.updateAccuracyMetrics(data);
         
         this.lastUpdate = new Date();
     }

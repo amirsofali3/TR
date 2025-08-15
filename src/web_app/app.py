@@ -232,16 +232,15 @@ def create_app(data_collector=None, indicator_engine=None, ml_model=None, tradin
             logger.error(f"Close position error: {e}")
             return jsonify({'error': str(e)}), 500
     
-    @app.route('/api/retrain_model', methods=['POST'])
+    @app.route('/api/retrain', methods=['POST'])
     def retrain_model():
-        """Manually trigger model retraining (Complete Pipeline Restructure)"""
+        """Manually trigger model retraining (User Feedback Adjustments)"""
         try:
             if not app.trading_engine:
                 return jsonify({'error': 'Trading engine not initialized'}), 500
             
-            # Get retrain type from request
-            data = request.get_json() if request.is_json else {}
-            retrain_type = data.get('type', 'fast')  # 'fast' or 'full'
+            # Always use fast retrain per user feedback (no Option B)
+            retrain_type = "fast"
             
             # Start retraining in background
             def retrain_background():
@@ -261,13 +260,120 @@ def create_app(data_collector=None, indicator_engine=None, ml_model=None, tradin
             thread.start()
             
             return jsonify({
-                'success': True, 
-                'message': f'{retrain_type.title()} model retraining started',
-                'type': retrain_type
-            })
+                'started': True, 
+                'mode': 'fast'
+            }), 202
             
         except Exception as e:
             logger.error(f"Retrain model error: {e}")
+            return jsonify({'error': str(e)}), 500
+
+    @app.route('/api/features')
+    def get_features():
+        """Get full selected and inactive features lists (User Feedback Adjustments)"""
+        try:
+            if not app.ml_model:
+                return jsonify({'error': 'ML model not initialized'}), 500
+            
+            # Get model info for features
+            model_info = app.ml_model.get_model_info()
+            selected_features = model_info.get('active_features', [])
+            inactive_features = model_info.get('inactive_features', [])
+            
+            # Get additional metadata
+            feature_importance = model_info.get('feature_importance', {})
+            
+            # Build detailed feature information
+            selected_detailed = []
+            for feature in selected_features:
+                selected_detailed.append({
+                    'name': feature,
+                    'importance': feature_importance.get(feature, 0.0),
+                    'status': 'selected'
+                })
+            
+            inactive_detailed = []
+            for feature in inactive_features:
+                inactive_detailed.append({
+                    'name': feature,
+                    'importance': feature_importance.get(feature, 0.0),
+                    'status': 'inactive'
+                })
+            
+            return jsonify({
+                'selected': selected_detailed,
+                'inactive': inactive_detailed,
+                'metadata': {
+                    'total_selected': len(selected_features),
+                    'total_inactive': len(inactive_features),
+                    'total_features': len(selected_features) + len(inactive_features),
+                    'model_version': model_info.get('model_version', 1),
+                    'last_training_time': model_info.get('last_training_time')
+                }
+            })
+            
+        except Exception as e:
+            logger.error(f"Features API error: {e}")
+            return jsonify({'error': str(e)}), 500
+
+    @app.route('/api/analysis/interval', methods=['POST'])
+    def change_analysis_interval():
+        """Change analysis interval dynamically (User Feedback Adjustments)"""
+        try:
+            if not app.trading_engine:
+                return jsonify({'error': 'Trading engine not initialized'}), 500
+            
+            data = request.get_json()
+            if not data or 'interval_sec' not in data:
+                return jsonify({'error': 'interval_sec is required'}), 400
+            
+            interval_sec = data['interval_sec']
+            
+            # Validate interval (must be one of allowed values)
+            allowed_intervals = [1, 5, 10, 15, 30, 60]
+            if interval_sec not in allowed_intervals:
+                return jsonify({
+                    'error': f'Invalid interval. Allowed values: {allowed_intervals}'
+                }), 400
+            
+            # Get current interval for logging
+            current_status = app.trading_engine.get_system_status()
+            old_interval = current_status.get('analysis', {}).get('interval_sec', BASE_ANALYSIS_INTERVAL_SEC)
+            
+            # Call trading engine method to change interval in background
+            def change_interval_background():
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                try:
+                    # For now, we'll store the new interval and let the trading engine pick it up
+                    # This avoids complex async issues in the web route
+                    app.trading_engine._pending_interval_change = interval_sec
+                    
+                    # Enhanced logging per user feedback
+                    logger.info(f"[ANALYSIS] Interval change requested old={old_interval}s new={interval_sec}s reason=\"user_request\"")
+                    
+                    # Emit WebSocket event for interval change
+                    socketio.emit('analysis_interval_changed', {
+                        'old_interval_sec': old_interval,
+                        'new_interval_sec': interval_sec,
+                        'timestamp': datetime.now().isoformat()
+                    })
+                finally:
+                    loop.close()
+            
+            thread = threading.Thread(target=change_interval_background)
+            thread.daemon = True
+            thread.start()
+            
+            return jsonify({
+                'success': True,
+                'old_interval_sec': old_interval,
+                'new_interval_sec': interval_sec,
+                'message': f'Analysis interval change requested from {old_interval}s to {interval_sec}s'
+            })
+            
+        except Exception as e:
+            logger.error(f"Change analysis interval error: {e}")
             return jsonify({'error': str(e)}), 500
     
     # SocketIO events for real-time updates
@@ -301,6 +407,7 @@ def create_app(data_collector=None, indicator_engine=None, ml_model=None, tradin
         
         last_collection_progress = None
         last_training_progress = None
+        last_indicator_progress = None
         last_accuracy = None
         
         while True:
@@ -318,13 +425,19 @@ def create_app(data_collector=None, indicator_engine=None, ml_model=None, tradin
                 # Emit general system update
                 socketio.emit('system_update', status)
                 
-                # Emit specific events for Complete Pipeline Restructure
+                # Emit specific events for Complete Pipeline Restructure + User Feedback
                 
                 # Collection progress event
                 collection_status = status.get('collection', {})
                 if collection_status != last_collection_progress:
                     socketio.emit('collection_progress', collection_status)
                     last_collection_progress = collection_status.copy() if collection_status else None
+                
+                # Indicator progress event (separate from training - User Feedback Adjustments)
+                indicator_progress = status.get('indicator_progress', {})
+                if indicator_progress != last_indicator_progress:
+                    socketio.emit('indicator_progress', indicator_progress)
+                    last_indicator_progress = indicator_progress.copy() if indicator_progress else None
                 
                 # Training progress event
                 training_status = status.get('training', {})

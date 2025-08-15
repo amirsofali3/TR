@@ -31,6 +31,16 @@ class TradingEngine:
         self.online_learning_active = False
         self.last_accuracy_update = None
         
+        # Analysis Interval Management (User Feedback Adjustments)
+        self.current_analysis_interval = BASE_ANALYSIS_INTERVAL_SEC
+        self._pending_interval_change = None
+        
+        # Collection metrics (User Feedback Adjustments)
+        self.collector_active = False
+        self.ticks_per_sec = 0.0  # EMA over last 60s
+        self._tick_count = 0
+        self._tick_time_window_start = None
+        
         # Import risk manager here to avoid circular imports
         from src.risk_management.risk_manager import RiskManagementSystem
         self.risk_manager = RiskManagementSystem()
@@ -721,28 +731,43 @@ class TradingEngine:
     async def manual_retrain(self, retrain_type: str = "fast") -> Dict[str, Any]:
         """Manually trigger a retrain (Complete Pipeline Restructure)"""
         try:
+            # Remove Option B - only fast retrain using existing data
             if retrain_type == "full":
-                return {
-                    "success": False,
-                    "message": "Full retrain cycle (re-bootstrap) not implemented yet",
-                    "error": "NOT_IMPLEMENTED"
-                }
+                logger.warning("[RETRAIN] Full retrain cycle (re-bootstrap) removed per user feedback")
+                retrain_type = "fast"  # Force to fast mode
             
-            # Fast retrain on accumulated data
-            logger.info("[RETRAIN] Manual fast retrain triggered...")
+            # Determine history window based on configuration
+            if RETRAIN_USE_FULL_HISTORY:
+                history_minutes = "full_history"
+                sample_limit = ML_LOOKBACK_PERIODS  # Use existing limit
+            else:
+                history_minutes = RETRAIN_HISTORY_MINUTES
+                # Calculate sample limit based on timeframe (approximate)
+                sample_limit = int(history_minutes * 60 / 240)  # Assuming 4h timeframe = 240 min
+                sample_limit = max(sample_limit, MIN_INITIAL_TRAIN_SAMPLES)  # Ensure minimum
             
-            # Get recent data
+            # Enhanced logging for retrain start
+            logger.info(f"[RETRAIN] mode=fast history_minutes={history_minutes} target_samples={sample_limit}")
+            
+            # Fast retrain on existing MySQL data only
             primary_symbol = 'BTCUSDT'
             historical_data = await self.data_collector.get_historical_data(
-                primary_symbol, DEFAULT_TIMEFRAME, ML_LOOKBACK_PERIODS
+                primary_symbol, DEFAULT_TIMEFRAME, sample_limit
             )
             
-            if historical_data is None or len(historical_data) < MIN_INITIAL_TRAIN_SAMPLES:
+            if historical_data is None or len(historical_data) < MIN_VALID_SAMPLES:
+                samples_count = len(historical_data) if historical_data is not None else 0
+                logger.warning(f"[RETRAIN] Insufficient samples: {samples_count} < {MIN_VALID_SAMPLES}")
                 return {
                     "success": False,
-                    "message": f"Insufficient data for retrain ({len(historical_data) if historical_data is not None else 0} samples)",
-                    "error": "INSUFFICIENT_DATA"
+                    "message": f"Insufficient data for retrain ({samples_count} samples, minimum {MIN_VALID_SAMPLES})",
+                    "error": "INSUFFICIENT_DATA",
+                    "samples_found": samples_count,
+                    "samples_required": MIN_VALID_SAMPLES
                 }
+            
+            actual_samples = len(historical_data)
+            logger.info(f"[RETRAIN] Using {actual_samples} existing samples from MySQL")
             
             # Calculate indicators
             indicators = await self.indicator_engine.calculate_all_indicators(
@@ -768,11 +793,15 @@ class TradingEngine:
                 self.last_retrain_time = datetime.now()
                 self._schedule_next_retrain()
                 
+                logger.success(f"[RETRAIN] Completed successfully with {actual_samples} samples")
+                
                 return {
                     "success": True,
                     "message": "Manual retrain completed successfully",
                     "model_version": self.ml_model.model_version,
-                    "training_count": self.ml_model.training_count
+                    "training_count": self.ml_model.training_count,
+                    "samples_used": actual_samples,
+                    "mode": "fast"
                 }
             else:
                 return {
@@ -801,11 +830,117 @@ class TradingEngine:
             "last_accuracy_update": self.last_accuracy_update.isoformat() if self.last_accuracy_update else None
         }
     
-    # ==================== END ONLINE LEARNING ====================
+    # ==================== USER FEEDBACK ADJUSTMENTS ====================
+    
+    def _check_pending_interval_change(self):
+        """Check and apply any pending analysis interval changes"""
+        if self._pending_interval_change is not None:
+            old_interval = self.current_analysis_interval
+            new_interval = self._pending_interval_change
+            
+            # Apply the interval change
+            self.current_analysis_interval = new_interval
+            self._pending_interval_change = None
+            
+            logger.info(f"[ANALYSIS] Applied interval change: {old_interval}s -> {new_interval}s")
+    
+    def _get_indicator_progress(self) -> Dict[str, Any]:
+        """Get indicator computation progress (separate from training progress)"""
+        try:
+            indicators_summary = self.indicator_engine.get_indicators_summary()
+            
+            # Calculate skipped indicators
+            skipped = indicators_summary.get('skipped', [])
+            
+            return {
+                'phase': 'completed' if indicators_summary.get('computed_count', 0) > 0 else 'loading',
+                'total_defined': indicators_summary.get('total_defined', 0),
+                'to_compute': indicators_summary.get('rfe_candidate_count', 0) + indicators_summary.get('must_keep_count', 0),
+                'computed_count': indicators_summary.get('computed_count', 0),
+                'percent': round((indicators_summary.get('computed_count', 0) / max(indicators_summary.get('total_defined', 1), 1)) * 100, 1),
+                'skipped_count': len(skipped),
+                'skipped': [{'name': s.get('name', ''), 'reason': s.get('reason', '')} for s in skipped[:10]]  # Limit to 10 for WebSocket
+            }
+        except Exception as e:
+            logger.error(f"Failed to get indicator progress: {e}")
+            return {
+                'phase': 'error',
+                'total_defined': 0,
+                'to_compute': 0,
+                'computed_count': 0,
+                'percent': 0,
+                'skipped_count': 0,
+                'skipped': []
+            }
+    
+    def _get_features_info(self) -> Dict[str, Any]:
+        """Get features information summary for status API"""
+        try:
+            model_info = self.ml_model.get_model_info()
+            selected_features = model_info.get('active_features', [])
+            inactive_features = model_info.get('inactive_features', [])
+            
+            # For status API, provide summary with truncated lists (first 100)
+            return {
+                'selected': selected_features[:100],  # Truncate for WebSocket
+                'inactive': inactive_features[:100],  # Truncate for WebSocket
+                'counts': {
+                    'selected': len(selected_features),
+                    'inactive': len(inactive_features),
+                    'total': len(selected_features) + len(inactive_features)
+                }
+            }
+        except Exception as e:
+            logger.error(f"Failed to get features info: {e}")
+            return {
+                'selected': [],
+                'inactive': [],
+                'counts': {'selected': 0, 'inactive': 0, 'total': 0}
+            }
+    
+    def _check_insufficient_samples(self) -> bool:
+        """Check if there are insufficient samples after sanitization"""
+        try:
+            model_info = self.ml_model.get_model_info()
+            valid_samples = model_info.get('collected_valid_samples', 0)
+            return valid_samples > 0 and valid_samples < MIN_VALID_SAMPLES
+        except Exception:
+            return False
+    
+    def update_tick_metrics(self):
+        """Update ticks per second metrics (called by data collector)"""
+        import time
+        current_time = time.time()
+        
+        if self._tick_time_window_start is None:
+            self._tick_time_window_start = current_time
+            self._tick_count = 0
+        
+        self._tick_count += 1
+        
+        # Calculate TPS over 60-second window
+        window_duration = current_time - self._tick_time_window_start
+        if window_duration >= 60:  # 60-second window
+            current_tps = self._tick_count / window_duration
+            
+            # EMA with alpha=0.3 for smoothing
+            if self.ticks_per_sec == 0:
+                self.ticks_per_sec = current_tps
+            else:
+                self.ticks_per_sec = 0.3 * current_tps + 0.7 * self.ticks_per_sec
+            
+            # Reset window
+            self._tick_time_window_start = current_time
+            self._tick_count = 0
+    
+    # ==================== END USER FEEDBACK ADJUSTMENTS ====================
     
     def get_system_status(self) -> Dict[str, Any]:
         """Get comprehensive system status for web interface (Complete Pipeline Restructure)"""
         try:
+            # Check for pending interval changes
+            self._check_pending_interval_change()
+            
             # Model info
             model_info = self.ml_model.get_model_info()
             
@@ -825,9 +960,15 @@ class TradingEngine:
             
             # Get bootstrap collection status
             collection_status = self.data_collector.get_bootstrap_status()
+            # Add collection metrics (User Feedback Adjustments)
+            collection_status['collector_active'] = self.collector_active
+            collection_status['ticks_per_sec'] = round(self.ticks_per_sec, 2)
             
             # Get indicators summary
             indicators_summary = self.indicator_engine.get_indicators_summary()
+            
+            # Add separate indicator progress (User Feedback Adjustments)
+            indicator_progress = self._get_indicator_progress()
             
             # Get database backend info
             backend_info = {}
@@ -840,6 +981,12 @@ class TradingEngine:
             # Get online learning status
             online_learning_status = self.get_online_learning_status()
             
+            # Get feature information (User Feedback Adjustments)
+            features_info = self._get_features_info()
+            
+            # Check for insufficient samples flag
+            insufficient_samples_flag = self._check_insufficient_samples()
+            
             return {
                 # Core system status
                 'system_running': self.running,
@@ -851,18 +998,35 @@ class TradingEngine:
                 # Bootstrap collection status (Complete Pipeline Restructure)
                 'collection': collection_status,
                 
-                # Training status with enhanced fields (Complete Pipeline Restructure)
+                # Analysis configuration (User Feedback Adjustments)
+                'analysis': {
+                    'interval_sec': self.current_analysis_interval,
+                    'raw_collection_interval_sec': RAW_COLLECTION_INTERVAL_SEC
+                },
+                
+                # Indicator progress (separate from training - User Feedback Adjustments)  
+                'indicator_progress': indicator_progress,
+                
+                # Training status with enhanced fields (Complete Pipeline Restructure + User Feedback)
                 'training': {
                     'phase': model_info.get('current_training_stage', 'idle'),
                     'progress_percent': model_info.get('training_progress', 0.0),
                     'last_training_error': model_info.get('last_training_error'),
                     'last_accuracy': model_info.get('last_accuracy', 0.0),
                     'accuracy_live': model_info.get('accuracy_live', 0.0),
+                    'accuracy_window_size': ACCURACY_SLIDING_WINDOW,
+                    'accuracy_live_count': model_info.get('accuracy_live_count', 0),
+                    'accuracy_warming_up': model_info.get('accuracy_live_count', 0) < ACCURACY_SLIDING_WINDOW,
                     'model_version': model_info.get('model_version', 1),
                     'training_count': model_info.get('training_count', 0),
                     'class_distribution': model_info.get('class_distribution', {}),
                     'class_weights': model_info.get('class_weights', {}),
+                    'class_mapping': model_info.get('class_mapping', {"0": "SELL", "1": "HOLD", "2": "BUY"}),
                     'selected_feature_count': model_info.get('selected_feature_count', 0),
+                    'collected_valid_samples': model_info.get('collected_valid_samples', 0),
+                    'flag_insufficient_samples': insufficient_samples_flag,
+                    'warning': "INSUFFICIENT_SAMPLES" if insufficient_samples_flag else None,
+                    'features': features_info,
                     'last_training_time': model_info.get('last_training_time'),
                     'next_retrain_at': online_learning_status.get('next_retrain_time'),
                     'accuracy_window_stats': model_info.get('accuracy_window_stats', {}),

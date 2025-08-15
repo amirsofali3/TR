@@ -4,12 +4,15 @@ A comprehensive cryptocurrency trading AI system with advanced machine learning,
 
 ## 🚀 Features
 
-### 🤖 Advanced AI Trading
+### 🤖 Advanced AI Trading (Updated)
 - **CatBoost ML Model** with high depth and tree count for maximum accuracy
-- **RFE Feature Selection** to identify the most impactful indicators
-- **435+ Technical Indicators** from comprehensive encyclopedia
-- **Confidence-based Execution** (only >70% confidence trades)
-- **Auto-retraining** with latest market data every 6 hours
+- **RFE Feature Selection** to identify the most impactful indicators from 435+ features
+- **435+ Technical Indicators** from comprehensive trading encyclopedia
+- **Confidence-based Execution** (only >70% confidence trades)  
+- **Fast Retrain System** using existing MySQL data (no fresh data collection required)
+- **Auto-retraining** with configurable intervals and minimum sample requirements
+- **Class Mapping**: Clear SELL/HOLD/BUY predictions with explicit mapping
+- **Live Accuracy Tracking**: Sliding window accuracy with 60-second update intervals
 
 ### 📊 Comprehensive Technical Analysis
 - **Trend Indicators**: SMA, EMA, MACD, Ichimoku, SuperTrend, Parabolic SAR
@@ -19,6 +22,7 @@ A comprehensive cryptocurrency trading AI system with advanced machine learning,
 - **Price Action**: Returns, patterns, support/resistance levels
 - **Candlestick Patterns**: 25+ pattern recognition algorithms
 - **Order Book Analysis**: Bid/ask spreads, depth analysis, imbalance calculations
+- **Indicator Progress Tracking**: Real-time computation progress with phase monitoring
 
 ### 💰 Advanced Risk Management
 - **Step-wise TP/SL System**: Multiple take profit levels with trailing stops
@@ -26,21 +30,27 @@ A comprehensive cryptocurrency trading AI system with advanced machine learning,
 - **Position Size Management**: Based on confidence and portfolio balance
 - **Portfolio Tracking**: Real-time P&L, daily performance, position monitoring
 
-### 🌐 Real-time Web Dashboard
+### 🌐 Real-time Web Dashboard (Enhanced)
 - **Live Market Data**: Real-time price updates and analysis
-- **Indicator Status**: Visual active/inactive indicators with blinking lights
-- **Model Training Progress**: Live training status and accuracy metrics
+- **Indicator Progress Panel**: Real-time computation status with phase tracking
+- **Feature Selection Summary**: Selected vs inactive features with detailed counts
+- **Analysis Interval Controls**: User-adjustable analysis timeframes (1s-60s)
+- **Accuracy Metrics Panel**: Initial/live accuracy with sliding window progress
+- **Enhanced Retrain Controls**: Fast MySQL retrain with clear status messaging
+- **Model Training Progress**: Live training status and comprehensive accuracy metrics
 - **Portfolio Management**: Balance, positions, P&L tracking
 - **Signal History**: Recent trading signals with execution status
 - **TP/SL Configuration**: Per-symbol TP/SL settings
+- **WebSocket Events**: Real-time updates for all system components
 
-### 🔧 System Architecture
-- **4-Hour Timeframe Analysis** with 1-minute price updates
+### 🔧 System Architecture (Updated)
+- **Dual Collection System**: 1-second raw data collection, 5-second analysis intervals (user-configurable)
+- **MySQL Integration**: Primary database with SQLite fallback support
 - **Demo Mode**: Paper trading with real market data
-- **Database Persistence**: SQLite for data storage and history
-- **Async Operations**: Non-blocking data collection and analysis
-- **REST API**: Full API for external integrations
-- **WebSocket**: Real-time dashboard updates
+- **Database Persistence**: MySQL-first with comprehensive schema auto-creation
+- **Async Operations**: Non-blocking data collection and analysis with metrics tracking
+- **Enhanced REST API**: Full API with new endpoints for features and interval management
+- **WebSocket**: Real-time dashboard updates with dedicated event streams
 
 ## 📋 Requirements
 
@@ -287,27 +297,57 @@ TP5: $55,000 (10%) - Close remaining 20%, move SL to TP4
 - **Mobile Responsive**: Works on all device types
 - **Dark Mode Ready**: Professional trading interface
 
-## 📡 API Endpoints
+## 📡 API Endpoints (Enhanced)
 
 ### System Information
 ```
-GET /api/status          - System status and configuration
+GET /api/status          - Comprehensive system status with new fields:
+                          • analysis: interval_sec, raw_collection_interval_sec
+                          • indicator_progress: phase, computed_count, percent, skipped
+                          • training.class_mapping: explicit SELL/HOLD/BUY mapping
+                          • training.features: selected/inactive feature counts
+                          • training.accuracy_window_size, accuracy_live_count
+                          • training.flag_insufficient_samples (if < MIN_VALID_SAMPLES)
 GET /api/indicators      - Indicator status and importance
 GET /api/portfolio       - Portfolio summary and positions
 GET /api/signals         - Recent trading signals
 GET /api/prices          - Current market prices
 ```
 
+### Feature Management (New)
+```
+GET /api/features        - Complete selected and inactive features lists with metadata:
+                          • selected: [{name, importance, status}, ...]
+                          • inactive: [{name, importance, status}, ...]
+                          • metadata: total counts, model version, last training time
+```
+
 ### Configuration
 ```
 GET /api/tp_sl_config/{symbol}     - Get TP/SL configuration
 POST /api/tp_sl_config/{symbol}    - Update TP/SL configuration
+POST /api/analysis/interval        - Change analysis interval dynamically:
+                                    • Body: {"interval_sec": 5|10|15|30|60}
+                                    • Triggers WebSocket: analysis_interval_changed
 ```
 
 ### Trading Operations
 ```
 POST /api/close_position/{id}      - Manually close position
-POST /api/retrain_model            - Trigger model retraining
+POST /api/retrain                  - Fast retrain using existing MySQL data only:
+                                    • Always uses existing data (no fresh collection)
+                                    • Returns 202 Accepted: {"started": true, "mode": "fast"}
+                                    • Respects RETRAIN_USE_FULL_HISTORY configuration
+```
+
+### WebSocket Events (New)
+```
+indicator_progress              - Real-time indicator computation progress
+analysis_interval_changed       - Notification when user changes analysis interval
+training_progress              - Model training progress updates
+accuracy_update               - Live accuracy updates (60-second intervals)
+collection_progress           - Data collection status updates  
+system_update                 - Comprehensive system status updates
 ```
 
 ## 🔧 Configuration
@@ -326,11 +366,19 @@ SUPPORTED_PAIRS = [
     "BNBUSDT", "XRPUSDT", "LTCUSDT", "BCHUSDT", "EOSUSDT"
 ]
 
-# ML Configuration
+# ML Configuration (Enhanced)
 ML_LOOKBACK_PERIODS = 500          # Data for RFE selection
 CATBOOST_ITERATIONS = 1000         # Model complexity
 CATBOOST_DEPTH = 10                # Tree depth
 RFE_N_FEATURES = 50                # Selected features
+
+# Pipeline Configuration (New)
+BASE_ANALYSIS_INTERVAL_SEC = 5     # Default analysis timeframe (user-adjustable)
+RAW_COLLECTION_INTERVAL_SEC = 1    # Fixed raw data collection interval
+ACCURACY_UPDATE_INTERVAL_SEC = 60  # Live accuracy update frequency
+MIN_VALID_SAMPLES = 150            # Minimum samples after sanitization
+RETRAIN_USE_FULL_HISTORY = True    # Use all available data for retrain
+RETRAIN_HISTORY_MINUTES = 180      # History window when not using full history
 
 # Risk Management
 DEFAULT_TP_LEVELS = [0.02, 0.04, 0.06, 0.08, 0.10]  # TP percentages
