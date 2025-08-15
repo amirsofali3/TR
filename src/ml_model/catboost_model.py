@@ -963,7 +963,13 @@ class CatBoostTradingModel:
     # ==================== END SLIDING WINDOW ACCURACY TRACKING ====================
     
     def get_model_info(self) -> Dict[str, Any]:
-        """Get model information for web interface (Complete Pipeline Restructure)"""
+        """Get model information for web interface (Complete Pipeline Restructure + User Feedback Adjustments)"""
+        # Standard class mapping (User Feedback Adjustments)
+        class_mapping = {"0": "SELL", "1": "HOLD", "2": "BUY"}
+        
+        # Get accuracy window stats
+        accuracy_stats = self.get_accuracy_window_stats()
+        
         return {
             'is_trained': self.is_trained,
             'training_progress': self.overall_training_progress,  # Use new overall progress
@@ -996,6 +1002,10 @@ class CatBoostTradingModel:
             'current_training_stage': self.current_training_stage,
             'accuracy_live': self.accuracy_live,
             'last_accuracy': self.model_performance.get('accuracy', 0.0),
-            'accuracy_window_stats': self.get_accuracy_window_stats(),
-            'training_progress_info': self.get_training_progress_info()
+            'accuracy_window_stats': accuracy_stats,
+            'training_progress_info': self.get_training_progress_info(),
+            # User Feedback Adjustments
+            'class_mapping': class_mapping,
+            'accuracy_live_count': accuracy_stats.get('live_count', 0),
+            'collected_valid_samples': self.model_performance.get('training_samples', 0)  # Valid samples after sanitization
         }

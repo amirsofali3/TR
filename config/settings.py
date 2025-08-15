@@ -85,7 +85,18 @@ INITIAL_COLLECTION_TIMEFRAME = "1s"  # Raw tick collection timeframe
 ONLINE_RETRAIN_INTERVAL_SEC = 900  # 15 minutes between automatic retrains
 MIN_NEW_SAMPLES_FOR_RETRAIN = 300  # Minimum new samples to trigger retrain
 ACCURACY_SLIDING_WINDOW = 1000  # Number of recent predictions for live accuracy
-ACCURACY_UPDATE_INTERVAL_SEC = 1  # Update live accuracy every second
+ACCURACY_UPDATE_INTERVAL_SEC = 60  # Update live accuracy every 60 seconds
+
+# Data Collection & Analysis Separation (User Feedback Adjustments)
+RAW_COLLECTION_INTERVAL_SEC = 1  # Fixed raw data collection interval
+BASE_ANALYSIS_INTERVAL_SEC = 5  # Default analysis interval (user-adjustable)
+
+# Training Sample Requirements (User Feedback Adjustments)
+MIN_VALID_SAMPLES = 150  # Minimum valid samples after sanitization
+
+# Retrain Configuration (User Feedback Adjustments)
+RETRAIN_USE_FULL_HISTORY = True  # Use full history for retrain by default
+RETRAIN_HISTORY_MINUTES = 180  # History window when RETRAIN_USE_FULL_HISTORY=False
 
 # MySQL Enforcement Configuration (Complete Pipeline Restructure) 
 FORCE_MYSQL_ONLY = True  # Prevent SQLite fallback, require MySQL credentials
