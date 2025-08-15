@@ -16,6 +16,7 @@ ccxt==4.1.74
 sqlalchemy==2.0.23
 sqlite3  # Built-in
 psycopg2-binary==2.9.9
+pymysql==1.1.1  # MySQL migration support
 
 # Web Framework
 flask==3.0.0

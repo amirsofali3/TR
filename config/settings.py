@@ -18,12 +18,32 @@ SUPPORTED_PAIRS = [
 # Database Configuration
 DATABASE_URL = "sqlite:///data/trading_system.db"
 
+# MySQL Configuration (MySQL migration)
+# Set MYSQL_ENABLED=true in environment to use MySQL instead of SQLite
+MYSQL_ENABLED = False
+MYSQL_HOST = "localhost"
+MYSQL_PORT = 3306
+MYSQL_USER = "root" 
+MYSQL_PASSWORD = ""
+MYSQL_DB = "trading_system"
+MYSQL_CHARSET = "utf8mb4"
+MYSQL_TIMEZONE = "+00:00"
+
 # Machine Learning Configuration
 ML_LOOKBACK_PERIODS = 500  # Number of recent candles for RFE selection
 CATBOOST_ITERATIONS = 1000
 CATBOOST_DEPTH = 10
 CATBOOST_LEARNING_RATE = 0.1
 RFE_N_FEATURES = 50  # Number of features to select with RFE
+
+# ML Training Pipeline Configuration (MySQL migration)
+MIN_INITIAL_TRAIN_SAMPLES = 400  # Minimum samples required for initial training
+MIN_RFE_SAMPLES = 150  # Minimum samples for RFE, otherwise use baseline features
+MAX_BASELINE_FEATURES = 120  # Max features when RFE is skipped
+TRAIN_RETRY_COOLDOWN_MIN = 10  # Minutes to wait before retrying failed training
+
+# Fallback Strategy Configuration (MySQL migration) 
+ALLOW_FALLBACK_EXECUTION = False  # Allow fallback signals to execute trades
 
 # Risk Management Configuration
 DEFAULT_TP_LEVELS = [0.02, 0.04, 0.06, 0.08, 0.10]  # TP levels as percentages

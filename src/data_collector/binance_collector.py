@@ -15,6 +15,9 @@ from binance.client import Client
 from binance.exceptions import BinanceAPIException
 import ccxt.async_support as ccxt
 
+# Import database manager for MySQL migration
+from src.database.db_manager import db_manager
+
 from config.settings import *
 
 class BinanceDataCollector:
@@ -90,52 +93,80 @@ class BinanceDataCollector:
             raise
     
     async def init_database(self):
-        """Initialize SQLite database for storing market data"""
+        """Initialize database for storing market data (MySQL migration)"""
         try:
-            # Create data directory if it doesn't exist
-            import os
-            os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
-            
-            conn = sqlite3.connect(self.db_path)
-            cursor = conn.cursor()
+            # Create data directory if using SQLite
+            if db_manager.backend == 'sqlite':
+                import os
+                os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
             
             # Create tables for market data
-            cursor.execute('''
-                CREATE TABLE IF NOT EXISTS market_data (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    symbol TEXT NOT NULL,
-                    timeframe TEXT NOT NULL,
-                    timestamp INTEGER NOT NULL,
-                    open REAL NOT NULL,
-                    high REAL NOT NULL,
-                    low REAL NOT NULL,
-                    close REAL NOT NULL,
-                    volume REAL NOT NULL,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    UNIQUE(symbol, timeframe, timestamp)
-                )
-            ''')
-            
-            # Create table for real-time prices
-            cursor.execute('''
-                CREATE TABLE IF NOT EXISTS real_time_prices (
-                    symbol TEXT PRIMARY KEY,
-                    price REAL NOT NULL,
-                    bid_price REAL,
-                    ask_price REAL,
-                    bid_size REAL,
-                    ask_size REAL,
-                    timestamp INTEGER NOT NULL,
-                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                )
-            ''')
+            if db_manager.backend == 'mysql':
+                # MySQL schema
+                db_manager.execute('''
+                    CREATE TABLE IF NOT EXISTS market_data (
+                        id INT AUTO_INCREMENT PRIMARY KEY,
+                        symbol VARCHAR(20) NOT NULL,
+                        timeframe VARCHAR(10) NOT NULL,
+                        timestamp BIGINT NOT NULL,
+                        open DECIMAL(20,8) NOT NULL,
+                        high DECIMAL(20,8) NOT NULL,
+                        low DECIMAL(20,8) NOT NULL,
+                        close DECIMAL(20,8) NOT NULL,
+                        volume DECIMAL(20,8) NOT NULL,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        UNIQUE KEY unique_candle (symbol, timeframe, timestamp)
+                    ) ENGINE=InnoDB
+                ''')
+                
+                # Real-time prices table
+                db_manager.execute('''
+                    CREATE TABLE IF NOT EXISTS real_time_prices (
+                        symbol VARCHAR(20) PRIMARY KEY,
+                        price DECIMAL(20,8) NOT NULL,
+                        bid_price DECIMAL(20,8),
+                        ask_price DECIMAL(20,8),
+                        bid_size DECIMAL(20,8),
+                        ask_size DECIMAL(20,8),
+                        timestamp BIGINT NOT NULL,
+                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+                    ) ENGINE=InnoDB
+                ''')
+            else:
+                # SQLite schema (original)
+                db_manager.execute('''
+                    CREATE TABLE IF NOT EXISTS market_data (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        symbol TEXT NOT NULL,
+                        timeframe TEXT NOT NULL,
+                        timestamp INTEGER NOT NULL,
+                        open REAL NOT NULL,
+                        high REAL NOT NULL,
+                        low REAL NOT NULL,
+                        close REAL NOT NULL,
+                        volume REAL NOT NULL,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        UNIQUE(symbol, timeframe, timestamp)
+                    )
+                ''')
+                
+                # Real-time prices table
+                db_manager.execute('''
+                    CREATE TABLE IF NOT EXISTS real_time_prices (
+                        symbol TEXT PRIMARY KEY,
+                        price REAL NOT NULL,
+                        bid_price REAL,
+                        ask_price REAL,
+                        bid_size REAL,
+                        ask_size REAL,
+                        timestamp INTEGER NOT NULL,
+                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    )
+                ''')
             
             # Create indexes for better performance
-            cursor.execute('CREATE INDEX IF NOT EXISTS idx_market_data_symbol_time ON market_data(symbol, timeframe, timestamp)')
-            cursor.execute('CREATE INDEX IF NOT EXISTS idx_prices_symbol ON real_time_prices(symbol)')
-            
-            conn.commit()
-            conn.close()
+            db_manager.execute('CREATE INDEX IF NOT EXISTS idx_market_data_symbol_time ON market_data(symbol, timeframe, timestamp)')
+            db_manager.execute('CREATE INDEX IF NOT EXISTS idx_prices_symbol ON real_time_prices(symbol)')
             
             logger.info("Database initialized successfully")
             
@@ -250,46 +281,62 @@ class BinanceDataCollector:
             return None
     
     async def store_market_data(self, symbol: str, timeframe: str, data: pd.DataFrame):
-        """Store market data in database"""
+        """Store market data in database (MySQL migration)"""
         try:
-            conn = sqlite3.connect(self.db_path)
-            
             # Prepare data for insertion
             data_to_insert = data[['timestamp', 'open', 'high', 'low', 'close', 'volume']].copy()
             data_to_insert['symbol'] = symbol
             data_to_insert['timeframe'] = timeframe
             
-            # Use INSERT OR REPLACE to handle duplicates
-            cursor = conn.cursor()
-            for _, row in data_to_insert.iterrows():
-                cursor.execute('''
+            # Use appropriate INSERT statement based on backend
+            if db_manager.backend == 'mysql':
+                insert_query = '''
+                    INSERT IGNORE INTO market_data 
+                    (symbol, timeframe, timestamp, open, high, low, close, volume)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                '''
+            else:
+                insert_query = '''
                     INSERT OR REPLACE INTO market_data 
                     (symbol, timeframe, timestamp, open, high, low, close, volume)
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                ''', (
+                '''
+            
+            # Batch insert for efficiency
+            params_list = []
+            for _, row in data_to_insert.iterrows():
+                params_list.append((
                     row['symbol'], row['timeframe'], row['timestamp'],
                     row['open'], row['high'], row['low'], row['close'], row['volume']
                 ))
             
-            conn.commit()
-            conn.close()
+            db_manager.executemany(insert_query, params_list)
             
         except Exception as e:
             logger.error(f"Failed to store market data for {symbol}: {e}")
     
     async def get_historical_data(self, symbol: str, timeframe: str, limit: int = 500) -> Optional[pd.DataFrame]:
-        """Get historical data from database"""
+        """Get historical data from database (MySQL migration)"""
         try:
-            conn = sqlite3.connect(self.db_path)
+            # Use appropriate parameter placeholder for backend
+            if db_manager.backend == 'mysql':
+                query = '''
+                    SELECT timestamp, open, high, low, close, volume 
+                    FROM market_data 
+                    WHERE symbol = %s AND timeframe = %s 
+                    ORDER BY timestamp DESC 
+                    LIMIT %s
+                '''
+            else:
+                query = '''
+                    SELECT timestamp, open, high, low, close, volume 
+                    FROM market_data 
+                    WHERE symbol = ? AND timeframe = ? 
+                    ORDER BY timestamp DESC 
+                    LIMIT ?
+                '''
             
-            query = '''
-                SELECT timestamp, open, high, low, close, volume 
-                FROM market_data 
-                WHERE symbol = ? AND timeframe = ? 
-                ORDER BY timestamp DESC 
-                LIMIT ?
-            '''
-            
+            conn = db_manager.get_pandas_connection()
             df = pd.read_sql_query(query, conn, params=(symbol, timeframe, limit))
             conn.close()
             
@@ -359,16 +406,27 @@ class BinanceDataCollector:
             return None
     
     async def store_real_time_price(self, price_data: Dict):
-        """Store real-time price in database"""
+        """Store real-time price in database (MySQL migration)"""
         try:
-            conn = sqlite3.connect(self.db_path)
-            cursor = conn.cursor()
+            # Use appropriate INSERT statement based on backend
+            if db_manager.backend == 'mysql':
+                query = '''
+                    INSERT INTO real_time_prices 
+                    (symbol, price, bid_price, ask_price, bid_size, ask_size, timestamp) 
+                    VALUES (%s, %s, %s, %s, %s, %s, %s)
+                    ON DUPLICATE KEY UPDATE 
+                    price=VALUES(price), bid_price=VALUES(bid_price), ask_price=VALUES(ask_price),
+                    bid_size=VALUES(bid_size), ask_size=VALUES(ask_size), timestamp=VALUES(timestamp),
+                    updated_at=CURRENT_TIMESTAMP
+                '''
+            else:
+                query = '''
+                    INSERT OR REPLACE INTO real_time_prices 
+                    (symbol, price, bid_price, ask_price, bid_size, ask_size, timestamp) 
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                '''
             
-            cursor.execute('''
-                INSERT OR REPLACE INTO real_time_prices 
-                (symbol, price, bid_price, ask_price, bid_size, ask_size, timestamp) 
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-            ''', (
+            db_manager.execute(query, (
                 price_data['symbol'],
                 price_data['price'],
                 price_data.get('bid_price'),
@@ -377,9 +435,6 @@ class BinanceDataCollector:
                 price_data.get('ask_size'),
                 int(price_data['timestamp'] * 1000)
             ))
-            
-            conn.commit()
-            conn.close()
             
         except Exception as e:
             logger.error(f"Failed to store real-time price: {e}")
