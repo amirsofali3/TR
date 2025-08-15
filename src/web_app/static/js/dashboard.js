@@ -48,6 +48,10 @@ class TradingDashboard {
                 this.updateIndicatorProgress(data);
             });
             
+            this.socket.on('collection_progress', (data) => {
+                this.updateCollectionProgress(data);
+            });
+            
             this.socket.on('analysis_interval_changed', (data) => {
                 this.handleIntervalChange(data);
                 this.showAlert(`Analysis interval changed to ${data.new_interval_sec}s`, 'info');
@@ -686,6 +690,40 @@ class TradingDashboard {
         } else {
             skippedInfo.style.display = 'none';
         }
+    }
+    
+    updateCollectionProgress(data) {
+        const progressSection = document.getElementById('collection-progress-section');
+        const progressBar = document.getElementById('collection-progress-bar');
+        const statusSpan = document.getElementById('collection-status');
+        const recordsSpan = document.getElementById('collection-records-total');
+        const elapsedSpan = document.getElementById('collection-elapsed');
+        const remainingSpan = document.getElementById('collection-remaining');
+        
+        if (!data || !data.enabled) {
+            // Hide progress section if collection is not active
+            if (progressSection) progressSection.style.display = 'none';
+            return;
+        }
+        
+        // Show progress section
+        if (progressSection) progressSection.style.display = 'block';
+        
+        // Update progress bar
+        if (progressBar) {
+            const percent = Math.min(data.percent || 0, 100);
+            progressBar.style.width = `${percent}%`;
+            progressBar.textContent = `${percent.toFixed(1)}%`;
+            progressBar.setAttribute('aria-valuenow', percent);
+        }
+        
+        // Update status information
+        if (statusSpan) {
+            statusSpan.textContent = data.percent < 100 ? 'Collecting' : 'Completed';
+        }
+        if (recordsSpan) recordsSpan.textContent = data.records_total || 0;
+        if (elapsedSpan) elapsedSpan.textContent = `${data.elapsed_sec || 0}s`;
+        if (remainingSpan) remainingSpan.textContent = `${data.remaining_sec || 0}s`;
     }
     
     handleIntervalChange(data) {
