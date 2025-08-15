@@ -74,9 +74,6 @@
                                 </div>
                             </div>
                         </div>
-                        <button id="retrain-btn" class="btn btn-outline-primary">
-                            <i class="fas fa-sync me-2"></i>Retrain Model
-                        </button>
                     </div>
                 </div>
 
@@ -191,6 +188,20 @@
                                 </div>
                             </div>
                             <small class="text-muted">Raw collection: 1s (fixed)</small>
+                        </div>
+                        
+                        <!-- Data Collection Progress -->
+                        <div class="mb-3" id="collection-progress-section" style="display: none;">
+                            <label class="form-label">Collection Progress</label>
+                            <div class="progress mb-2" style="height: 20px;">
+                                <div id="collection-progress-bar" class="progress-bar bg-success" role="progressbar" style="width: 0%" aria-valuenow="0" aria-valuemin="0" aria-valuemax="100">0%</div>
+                            </div>
+                            <small class="text-muted">
+                                Status: <span id="collection-status">Idle</span> | 
+                                Records: <span id="collection-records-total">0</span> |
+                                Elapsed: <span id="collection-elapsed">0s</span> |
+                                Remaining: <span id="collection-remaining">0s</span>
+                            </small>
                         </div>
                         
                         <div class="mb-3">
