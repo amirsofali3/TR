@@ -415,7 +415,8 @@ def create_app(data_collector=None, indicator_engine=None, ml_model=None, tradin
             
             # Get table record counts
             tables = ['market_ticks', 'market_data', 'ohlc_1s', 'ohlc_1m', 
-                     'model_training_runs', 'real_time_prices', 'positions']
+                     'indicators_cache', 'positions', 'model_training_runs', 
+                     'model_metrics', 'real_time_prices']
             
             for table in tables:
                 try:
