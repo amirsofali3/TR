@@ -88,6 +88,107 @@ class CatBoostTradingModel:
             logger.error(f"Failed to initialize ML model: {e}")
             raise
     
+    def _sanitize_features(self, feature_df: pd.DataFrame) -> pd.DataFrame:
+        """Sanitize features to ensure they are numeric and suitable for CatBoost training"""
+        try:
+            logger.info("[TRAIN] Starting feature sanitization...")
+            sanitized_df = feature_df.copy()
+            initial_feature_count = len(sanitized_df.columns)
+            dropped_features = []
+            converted_features = []
+            
+            for column in feature_df.columns:
+                col_data = sanitized_df[column]
+                
+                # Check if column is already numeric
+                if pd.api.types.is_numeric_dtype(col_data):
+                    continue
+                
+                # Handle object/string columns
+                if col_data.dtype == 'object':
+                    unique_values = col_data.dropna().unique()
+                    unique_count = len(unique_values)
+                    
+                    logger.info(f"[TRAIN] Found non-numeric column '{column}' with {unique_count} unique values")
+                    
+                    # Drop constant columns (only one unique value)
+                    if unique_count <= 1:
+                        logger.info(f"[TRAIN] Dropping constant column: {column}")
+                        sanitized_df = sanitized_df.drop(columns=[column])
+                        dropped_features.append(column)
+                        continue
+                    
+                    # For categorical columns with few unique values, try label encoding
+                    elif unique_count <= 10:
+                        try:
+                            # Attempt to convert to numeric first
+                            numeric_col = pd.to_numeric(col_data, errors='coerce')
+                            if not numeric_col.isna().all():
+                                sanitized_df[column] = numeric_col
+                                converted_features.append(f"{column} (to_numeric)")
+                                continue
+                            
+                            # If conversion fails, use label encoding for low-cardinality categorical
+                            from sklearn.preprocessing import LabelEncoder
+                            le = LabelEncoder()
+                            sanitized_df[column] = le.fit_transform(col_data.astype(str))
+                            converted_features.append(f"{column} (label_encoded)")
+                            
+                        except Exception as e:
+                            logger.warning(f"[TRAIN] Could not convert column '{column}': {e}")
+                            sanitized_df = sanitized_df.drop(columns=[column])
+                            dropped_features.append(column)
+                    
+                    # Drop high-cardinality categorical columns
+                    else:
+                        logger.info(f"[TRAIN] Dropping high-cardinality column: {column} ({unique_count} unique values)")
+                        sanitized_df = sanitized_df.drop(columns=[column])
+                        dropped_features.append(column)
+                
+                # Handle other non-numeric types
+                else:
+                    try:
+                        # Try to convert to numeric
+                        sanitized_df[column] = pd.to_numeric(col_data, errors='coerce')
+                        converted_features.append(f"{column} (forced_numeric)")
+                    except:
+                        logger.warning(f"[TRAIN] Dropping unconvertible column: {column} (dtype: {col_data.dtype})")
+                        sanitized_df = sanitized_df.drop(columns=[column])
+                        dropped_features.append(column)
+            
+            # Final check: remove any columns that became all NaN after conversion
+            for column in sanitized_df.columns:
+                if sanitized_df[column].isna().all():
+                    logger.info(f"[TRAIN] Dropping all-NaN column after conversion: {column}")
+                    sanitized_df = sanitized_df.drop(columns=[column])
+                    dropped_features.append(column)
+            
+            # Remove any remaining rows with NaN values
+            rows_before = len(sanitized_df)
+            sanitized_df = sanitized_df.dropna()
+            rows_after = len(sanitized_df)
+            
+            # Log sanitization results
+            final_feature_count = len(sanitized_df.columns)
+            logger.info(f"[TRAIN] Feature sanitization completed:")
+            logger.info(f"[TRAIN]   Features: {initial_feature_count} → {final_feature_count}")
+            logger.info(f"[TRAIN]   Samples: {rows_before} → {rows_after}")
+            
+            if dropped_features:
+                logger.info(f"[TRAIN]   Dropped features ({len(dropped_features)}): {', '.join(dropped_features[:5])}" + 
+                          (f" and {len(dropped_features)-5} more" if len(dropped_features) > 5 else ""))
+            
+            if converted_features:
+                logger.info(f"[TRAIN]   Converted features ({len(converted_features)}): {', '.join(converted_features[:3])}" + 
+                          (f" and {len(converted_features)-3} more" if len(converted_features) > 3 else ""))
+            
+            return sanitized_df
+            
+        except Exception as e:
+            logger.error(f"[TRAIN] Feature sanitization failed: {e}")
+            # Return original dataframe as fallback, let training fail with better error
+            return feature_df
+    
     async def prepare_features_and_labels(self, data: Dict[str, Any], symbol: str) -> Tuple[pd.DataFrame, pd.Series]:
         """Prepare features and labels from indicator data (MySQL migration improved)"""
         try:
@@ -120,6 +221,13 @@ class CatBoostTradingModel:
                 return pd.DataFrame(), pd.Series()
             
             logger.info(f"[TRAIN] Samples after dropna: {clean_sample_count} (dropped {raw_sample_count - clean_sample_count})")
+            
+            # Robust feature sanitization to handle non-numeric columns
+            feature_df = self._sanitize_features(feature_df)
+            
+            if len(feature_df.columns) == 0:
+                logger.error("[TRAIN] No valid features after sanitization")
+                return pd.DataFrame(), pd.Series()
             
             # Generate labels based on future price movement
             labels = await self.generate_labels(feature_df, symbol)
@@ -524,9 +632,13 @@ class CatBoostTradingModel:
             
             # Re-run feature selection on recent data
             if len(X_recent) >= 50:  # Minimum samples for RFE
-                await self.train_model(X_recent, y_recent, rfe_eligible_features)
-                logger.info("Online retraining completed")
-                return True
+                training_success = await self.train_model(X_recent, y_recent, rfe_eligible_features)
+                if training_success:
+                    logger.info("Online retraining completed")
+                    return True
+                else:
+                    logger.warning("Online retraining failed during model training")
+                    return False
             else:
                 logger.warning("Insufficient data for retraining")
                 return False
