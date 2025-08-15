@@ -34,50 +34,59 @@ class DatabaseManager:
     
     def _detect_backend(self):
         """Auto-detect database backend based on configuration with MySQL enforcement"""
-        # Check for MySQL enforcement - environment variable takes precedence
         force_mysql_only = os.getenv('FORCE_MYSQL_ONLY', '').lower()
         if force_mysql_only == '':
-            # No env var set, use settings
             try:
                 from config.settings import FORCE_MYSQL_ONLY
                 force_mysql_only = FORCE_MYSQL_ONLY
             except ImportError:
-                force_mysql_only = True  # Default to True
+                force_mysql_only = True
         else:
-            # Environment variable set, convert to boolean
             force_mysql_only = force_mysql_only == 'true'
         
-        # Check for MySQL configuration via environment variables
+        allow_empty_pw = os.getenv('ALLOW_EMPTY_MYSQL_PASSWORD', 'false').lower() == 'true'
+        
         mysql_enabled = os.getenv('MYSQL_ENABLED', 'false').lower() == 'true'
         mysql_db_set = os.getenv('MYSQL_DB') is not None
         
-        # Validate required MySQL credentials
         required_vars = ['MYSQL_HOST', 'MYSQL_USER', 'MYSQL_PASSWORD', 'MYSQL_DB']
-        missing_vars = [var for var in required_vars if not os.getenv(var)]
+        missing_vars = []
+        for var in required_vars:
+            val = os.getenv(var)
+            if val is None:
+                missing_vars.append(var)
+            else:
+                stripped = val.strip()
+                if var == 'MYSQL_PASSWORD':
+                    if stripped == '' and not allow_empty_pw:
+                        missing_vars.append(var)
+                else:
+                    if stripped == '':
+                        missing_vars.append(var)
         
         if force_mysql_only:
-            # MySQL-only mode: require complete MySQL configuration
             if not MYSQL_AVAILABLE:
-                raise ImportError(
-                    "[DB] FORCE_MYSQL_ONLY=True but PyMySQL is not installed. "
-                    "Install with: pip install pymysql"
-                )
+                raise ImportError("[DB] FORCE_MYSQL_ONLY=True but PyMySQL not installed. Install with: pip install pymysql")
             
             if missing_vars:
                 logger.error(f"[DB] FORCE_MYSQL_ONLY=True but missing required MySQL environment variables:")
                 for var in missing_vars:
                     logger.error(f"[DB]   - {var} (not set)")
                 logger.error(f"[DB] Required variables: {', '.join(required_vars)}")
-                logger.error("[DB] Set all required MySQL variables or set FORCE_MYSQL_ONLY=False to allow SQLite fallback")
+                if allow_empty_pw:
+                    logger.error("[DB] Note: ALLOW_EMPTY_MYSQL_PASSWORD=True only bypasses empty password check if MYSQL_PASSWORD is defined (even if blank).")
                 raise ValueError(f"MySQL enforcement enabled but missing required variables: {', '.join(missing_vars)}")
             
-            # Setup MySQL backend (forced)
+            pw = os.getenv('MYSQL_PASSWORD', '')
+            if pw.strip() == '' and allow_empty_pw:
+                logger.warning("[DB] MySQL running with EMPTY PASSWORD (ALLOW_EMPTY_MYSQL_PASSWORD=True) — SECURITY RISK (dev only)")
+            
             self.backend = 'mysql'
             self.mysql_config = {
                 'host': os.getenv('MYSQL_HOST', 'localhost'),
                 'port': int(os.getenv('MYSQL_PORT', 3306)),
                 'user': os.getenv('MYSQL_USER', 'root'),
-                'password': os.getenv('MYSQL_PASSWORD', ''),
+                'password': pw,
                 'database': os.getenv('MYSQL_DB', 'trading_system'),
                 'charset': os.getenv('MYSQL_CHARSET', 'utf8mb4'),
                 'autocommit': True
@@ -85,44 +94,42 @@ class DatabaseManager:
             logger.info(f"[DB] MySQL-only mode: {self.mysql_config['user']}@{self.mysql_config['host']}:{self.mysql_config['port']}/{self.mysql_config['database']}")
             return
         
-        # Original logic for MySQL with fallback
+        # Fallback logic (unchanged except password handling already covered)
         if mysql_enabled and MYSQL_AVAILABLE:
             if missing_vars:
-                # Check AUTO_FALLBACK_DB from env var first, then settings
                 auto_fallback = os.getenv('AUTO_FALLBACK_DB', '').lower() == 'true'
                 if not auto_fallback:
                     try:
                         from config.settings import AUTO_FALLBACK_DB
                         auto_fallback = AUTO_FALLBACK_DB
                     except ImportError:
-                        auto_fallback = True  # Default to True if settings not available
-                        
-                logger.warning(f"[DB] MySQL enabled but missing required environment variables: {', '.join(missing_vars)}")
-                
+                        auto_fallback = True
+                logger.warning(f"[DB] MySQL enabled but missing environment variables: {', '.join(missing_vars)}")
                 if auto_fallback:
-                    logger.info("[DB] AUTO_FALLBACK_DB=True, falling back to SQLite")
+                    logger.info("[DB] AUTO_FALLBACK_DB=True, using SQLite fallback")
                     self._setup_sqlite_backend()
                     return
                 else:
-                    raise ValueError(f"MySQL enabled but missing required variables: {', '.join(missing_vars)}. Set AUTO_FALLBACK_DB=True to enable fallback.")
+                    raise ValueError(f"MySQL enabled but missing vars: {', '.join(missing_vars)}. Set AUTO_FALLBACK_DB=True to fallback.")
             
-            # Setup MySQL backend
+            pw = os.getenv('MYSQL_PASSWORD', '')
+            if pw.strip() == '' and allow_empty_pw:
+                logger.warning("[DB] MySQL (fallback mode) with EMPTY PASSWORD (ALLOW_EMPTY_MYSQL_PASSWORD=True) — SECURITY RISK")
+            
             self.backend = 'mysql'
             self.mysql_config = {
                 'host': os.getenv('MYSQL_HOST', 'localhost'),
                 'port': int(os.getenv('MYSQL_PORT', 3306)),
                 'user': os.getenv('MYSQL_USER', 'root'),
-                'password': os.getenv('MYSQL_PASSWORD', ''),
+                'password': pw,
                 'database': os.getenv('MYSQL_DB', 'trading_system'),
                 'charset': os.getenv('MYSQL_CHARSET', 'utf8mb4'),
                 'autocommit': True
             }
             logger.info(f"[DB] Using MySQL backend: {self.mysql_config['user']}@{self.mysql_config['host']}:{self.mysql_config['port']}/{self.mysql_config['database']}")
-            
         elif mysql_db_set and not mysql_enabled:
-            # User set MYSQL_DB but didn't enable MySQL - provide helpful message
-            logger.warning(f"[DB] MYSQL_DB is set to '{os.getenv('MYSQL_DB')}' but MYSQL_ENABLED is not 'true'. Using SQLite instead.")
-            logger.info("[DB] To use MySQL, set: export MYSQL_ENABLED=true")
+            logger.warning(f"[DB] MYSQL_DB set but MYSQL_ENABLED!='true' — using SQLite.")
+            logger.info("[DB] To use MySQL set MYSQL_ENABLED=true")
             self._setup_sqlite_backend()
         else:
             self._setup_sqlite_backend()
