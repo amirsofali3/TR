@@ -78,3 +78,23 @@ INACTIVE_FEATURE_WEIGHT = 0.01
 # Data Collection Configuration
 MAX_HISTORICAL_DAYS = 365  # Maximum days of historical data to fetch
 DATA_UPDATE_INTERVAL = 3600  # Update historical data every hour
+
+# Bootstrap Data Collection Configuration (Complete Pipeline Restructure)
+INITIAL_COLLECTION_DURATION_SEC = 3600  # Default 1 hour for bootstrap collection
+INITIAL_COLLECTION_TIMEFRAME = "1s"  # Raw tick collection timeframe
+ONLINE_RETRAIN_INTERVAL_SEC = 900  # 15 minutes between automatic retrains
+MIN_NEW_SAMPLES_FOR_RETRAIN = 300  # Minimum new samples to trigger retrain
+ACCURACY_SLIDING_WINDOW = 1000  # Number of recent predictions for live accuracy
+ACCURACY_UPDATE_INTERVAL_SEC = 1  # Update live accuracy every second
+
+# MySQL Enforcement Configuration (Complete Pipeline Restructure) 
+FORCE_MYSQL_ONLY = True  # Prevent SQLite fallback, require MySQL credentials
+MYSQL_MARKET_DATA_TABLE = "market_data"  # Configurable market data table name
+
+# Additional MySQL Table Names
+MYSQL_MARKET_TICKS_TABLE = "market_ticks"  # Raw tick data
+MYSQL_OHLC_1S_TABLE = "ohlc_1s"  # 1-second OHLC data
+MYSQL_OHLC_1M_TABLE = "ohlc_1m"  # 1-minute aggregated OHLC data
+MYSQL_INDICATORS_CACHE_TABLE = "indicators_cache"  # Indicator cache
+MYSQL_MODEL_TRAINING_RUNS_TABLE = "model_training_runs"  # Training audit trail
+MYSQL_MODEL_METRICS_TABLE = "model_metrics"  # Model performance metrics

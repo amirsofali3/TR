@@ -30,16 +30,60 @@ class DatabaseManager:
         self._detect_backend()
     
     def _detect_backend(self):
-        """Auto-detect database backend based on configuration"""
+        """Auto-detect database backend based on configuration with MySQL enforcement"""
+        # Check for MySQL enforcement - environment variable takes precedence
+        force_mysql_only = os.getenv('FORCE_MYSQL_ONLY', '').lower()
+        if force_mysql_only == '':
+            # No env var set, use settings
+            try:
+                from config.settings import FORCE_MYSQL_ONLY
+                force_mysql_only = FORCE_MYSQL_ONLY
+            except ImportError:
+                force_mysql_only = True  # Default to True
+        else:
+            # Environment variable set, convert to boolean
+            force_mysql_only = force_mysql_only == 'true'
+        
         # Check for MySQL configuration via environment variables
         mysql_enabled = os.getenv('MYSQL_ENABLED', 'false').lower() == 'true'
         mysql_db_set = os.getenv('MYSQL_DB') is not None
         
-        if mysql_enabled and MYSQL_AVAILABLE:
-            # Validate required MySQL credentials
-            required_vars = ['MYSQL_HOST', 'MYSQL_USER', 'MYSQL_PASSWORD', 'MYSQL_DB']
-            missing_vars = [var for var in required_vars if not os.getenv(var)]
+        # Validate required MySQL credentials
+        required_vars = ['MYSQL_HOST', 'MYSQL_USER', 'MYSQL_PASSWORD', 'MYSQL_DB']
+        missing_vars = [var for var in required_vars if not os.getenv(var)]
+        
+        if force_mysql_only:
+            # MySQL-only mode: require complete MySQL configuration
+            if not MYSQL_AVAILABLE:
+                raise ImportError(
+                    "[DB] FORCE_MYSQL_ONLY=True but PyMySQL is not installed. "
+                    "Install with: pip install pymysql"
+                )
             
+            if missing_vars:
+                logger.error(f"[DB] FORCE_MYSQL_ONLY=True but missing required MySQL environment variables:")
+                for var in missing_vars:
+                    logger.error(f"[DB]   - {var} (not set)")
+                logger.error(f"[DB] Required variables: {', '.join(required_vars)}")
+                logger.error("[DB] Set all required MySQL variables or set FORCE_MYSQL_ONLY=False to allow SQLite fallback")
+                raise ValueError(f"MySQL enforcement enabled but missing required variables: {', '.join(missing_vars)}")
+            
+            # Setup MySQL backend (forced)
+            self.backend = 'mysql'
+            self.mysql_config = {
+                'host': os.getenv('MYSQL_HOST'),
+                'port': int(os.getenv('MYSQL_PORT', 3306)),
+                'user': os.getenv('MYSQL_USER'),
+                'password': os.getenv('MYSQL_PASSWORD'),
+                'database': os.getenv('MYSQL_DB'),
+                'charset': os.getenv('MYSQL_CHARSET', 'utf8mb4'),
+                'autocommit': True
+            }
+            logger.info(f"[DB] MySQL-only mode: {self.mysql_config['user']}@{self.mysql_config['host']}:{self.mysql_config['port']}/{self.mysql_config['database']}")
+            return
+        
+        # Original logic for MySQL with fallback
+        if mysql_enabled and MYSQL_AVAILABLE:
             if missing_vars:
                 # Check AUTO_FALLBACK_DB from env var first, then settings
                 auto_fallback = os.getenv('AUTO_FALLBACK_DB', '').lower() == 'true'
@@ -70,12 +114,12 @@ class DatabaseManager:
                 'charset': os.getenv('MYSQL_CHARSET', 'utf8mb4'),
                 'autocommit': True
             }
-            logger.info(f"Using MySQL backend: {self.mysql_config['user']}@{self.mysql_config['host']}:{self.mysql_config['port']}/{self.mysql_config['database']}")
+            logger.info(f"[DB] Using MySQL backend: {self.mysql_config['user']}@{self.mysql_config['host']}:{self.mysql_config['port']}/{self.mysql_config['database']}")
             
         elif mysql_db_set and not mysql_enabled:
             # User set MYSQL_DB but didn't enable MySQL - provide helpful message
-            logger.warning(f"MYSQL_DB is set to '{os.getenv('MYSQL_DB')}' but MYSQL_ENABLED is not 'true'. Using SQLite instead.")
-            logger.info("To use MySQL, set: export MYSQL_ENABLED=true")
+            logger.warning(f"[DB] MYSQL_DB is set to '{os.getenv('MYSQL_DB')}' but MYSQL_ENABLED is not 'true'. Using SQLite instead.")
+            logger.info("[DB] To use MySQL, set: export MYSQL_ENABLED=true")
             self._setup_sqlite_backend()
         else:
             self._setup_sqlite_backend()
@@ -168,19 +212,34 @@ class DatabaseManager:
     
     def get_backend_info(self) -> Dict[str, Any]:
         """Get information about current database backend"""
+        # Determine FORCE_MYSQL_ONLY setting
+        force_mysql_only = os.getenv('FORCE_MYSQL_ONLY', '').lower()
+        if force_mysql_only == '':
+            try:
+                from config.settings import FORCE_MYSQL_ONLY
+                force_mysql_only = FORCE_MYSQL_ONLY
+            except ImportError:
+                force_mysql_only = True
+        else:
+            force_mysql_only = force_mysql_only == 'true'
+        
         if self.backend == 'mysql':
             return {
-                'backend': 'mysql',
-                'host': self.mysql_config['host'],
-                'port': self.mysql_config['port'],
-                'database': self.mysql_config['database'],
-                'charset': self.mysql_config['charset']
+                'db_engine': 'mysql',
+                'mysql_host': self.mysql_config['host'],
+                'mysql_port': self.mysql_config['port'],
+                'mysql_database': self.mysql_config['database'],
+                'mysql_charset': self.mysql_config['charset'],
+                'table_market_data': os.getenv('MYSQL_MARKET_DATA_TABLE', 'market_data'),
+                'force_mysql_only': force_mysql_only
             }
         else:
             return {
-                'backend': 'sqlite',
-                'path': self.sqlite_path,
-                'exists': os.path.exists(self.sqlite_path)
+                'db_engine': 'sqlite',
+                'sqlite_path': self.sqlite_path,
+                'sqlite_exists': os.path.exists(self.sqlite_path) if self.sqlite_path else False,
+                'table_market_data': 'market_data',
+                'force_mysql_only': force_mysql_only
             }
     
     def ensure_schema(self) -> bool:
@@ -229,15 +288,82 @@ class DatabaseManager:
             return False
     
     def _get_table_schemas(self) -> Dict[str, str]:
-        """Get table creation schemas for both MySQL and SQLite"""
-        # Use configurable table name - check env var first, then settings
-        market_table = os.getenv('MYSQL_MARKET_DATA_TABLE')
-        if not market_table:
-            from config.settings import MYSQL_MARKET_DATA_TABLE
-            market_table = MYSQL_MARKET_DATA_TABLE
+        """Get table creation schemas for both MySQL and SQLite with complete pipeline tables"""
+        # Use configurable table names
+        market_table = os.getenv('MYSQL_MARKET_DATA_TABLE') or 'market_data'
+        ticks_table = os.getenv('MYSQL_MARKET_TICKS_TABLE') or 'market_ticks'
+        ohlc_1s_table = os.getenv('MYSQL_OHLC_1S_TABLE') or 'ohlc_1s'
+        ohlc_1m_table = os.getenv('MYSQL_OHLC_1M_TABLE') or 'ohlc_1m'
+        indicators_cache_table = os.getenv('MYSQL_INDICATORS_CACHE_TABLE') or 'indicators_cache'
+        training_runs_table = os.getenv('MYSQL_MODEL_TRAINING_RUNS_TABLE') or 'model_training_runs'
+        model_metrics_table = os.getenv('MYSQL_MODEL_METRICS_TABLE') or 'model_metrics'
+        
+        try:
+            from config.settings import (
+                MYSQL_MARKET_DATA_TABLE, MYSQL_MARKET_TICKS_TABLE, MYSQL_OHLC_1S_TABLE,
+                MYSQL_OHLC_1M_TABLE, MYSQL_INDICATORS_CACHE_TABLE, 
+                MYSQL_MODEL_TRAINING_RUNS_TABLE, MYSQL_MODEL_METRICS_TABLE
+            )
+            market_table = market_table or MYSQL_MARKET_DATA_TABLE
+            ticks_table = ticks_table or MYSQL_MARKET_TICKS_TABLE
+            ohlc_1s_table = ohlc_1s_table or MYSQL_OHLC_1S_TABLE
+            ohlc_1m_table = ohlc_1m_table or MYSQL_OHLC_1M_TABLE
+            indicators_cache_table = indicators_cache_table or MYSQL_INDICATORS_CACHE_TABLE
+            training_runs_table = training_runs_table or MYSQL_MODEL_TRAINING_RUNS_TABLE
+            model_metrics_table = model_metrics_table or MYSQL_MODEL_METRICS_TABLE
+        except ImportError:
+            pass  # Use defaults
         
         if self.backend == 'mysql':
             return {
+                # Raw tick data (1-second or sub-second)
+                ticks_table: f"""
+                    CREATE TABLE IF NOT EXISTS {ticks_table} (
+                        id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                        symbol VARCHAR(20) NOT NULL,
+                        timestamp BIGINT NOT NULL,
+                        price DECIMAL(20,8) NOT NULL,
+                        volume DECIMAL(20,8) NOT NULL,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        INDEX idx_symbol_timestamp (symbol, timestamp)
+                    ) ENGINE=InnoDB
+                """,
+                
+                # 1-second OHLC data (aggregated from ticks)
+                ohlc_1s_table: f"""
+                    CREATE TABLE IF NOT EXISTS {ohlc_1s_table} (
+                        id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                        symbol VARCHAR(20) NOT NULL,
+                        timestamp BIGINT NOT NULL,
+                        open DECIMAL(20,8) NOT NULL,
+                        high DECIMAL(20,8) NOT NULL,
+                        low DECIMAL(20,8) NOT NULL,
+                        close DECIMAL(20,8) NOT NULL,
+                        volume DECIMAL(20,8) NOT NULL,
+                        tick_count INT DEFAULT 1,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        UNIQUE KEY unique_candle_1s (symbol, timestamp)
+                    ) ENGINE=InnoDB
+                """,
+                
+                # 1-minute OHLC data (aggregated from 1s data)
+                ohlc_1m_table: f"""
+                    CREATE TABLE IF NOT EXISTS {ohlc_1m_table} (
+                        id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                        symbol VARCHAR(20) NOT NULL,
+                        timestamp BIGINT NOT NULL,
+                        open DECIMAL(20,8) NOT NULL,
+                        high DECIMAL(20,8) NOT NULL,
+                        low DECIMAL(20,8) NOT NULL,
+                        close DECIMAL(20,8) NOT NULL,
+                        volume DECIMAL(20,8) NOT NULL,
+                        tick_count INT DEFAULT 60,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        UNIQUE KEY unique_candle_1m (symbol, timestamp)
+                    ) ENGINE=InnoDB
+                """,
+                
+                # Original market data table (for backward compatibility)
                 market_table: f"""
                     CREATE TABLE IF NOT EXISTS {market_table} (
                         id INT AUTO_INCREMENT PRIMARY KEY,
@@ -253,6 +379,49 @@ class DatabaseManager:
                         UNIQUE KEY unique_candle (symbol, timeframe, timestamp)
                     ) ENGINE=InnoDB
                 """,
+                
+                # Indicators cache for performance
+                indicators_cache_table: f"""
+                    CREATE TABLE IF NOT EXISTS {indicators_cache_table} (
+                        id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                        symbol VARCHAR(20) NOT NULL,
+                        timestamp BIGINT NOT NULL,
+                        indicator_name VARCHAR(100) NOT NULL,
+                        indicator_value DECIMAL(20,8),
+                        indicator_json TEXT,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        INDEX idx_symbol_timestamp_indicator (symbol, timestamp, indicator_name)
+                    ) ENGINE=InnoDB
+                """,
+                
+                # Model training runs audit trail
+                training_runs_table: f"""
+                    CREATE TABLE IF NOT EXISTS {training_runs_table} (
+                        id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                        model_version INT NOT NULL,
+                        training_started_at TIMESTAMP NOT NULL,
+                        training_completed_at TIMESTAMP,
+                        samples_count INT,
+                        features_selected INT,
+                        accuracy DECIMAL(5,4),
+                        training_error TEXT,
+                        status ENUM('started', 'completed', 'failed') DEFAULT 'started',
+                        config_json TEXT,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    ) ENGINE=InnoDB
+                """,
+                
+                # Model metrics key-value store
+                model_metrics_table: f"""
+                    CREATE TABLE IF NOT EXISTS {model_metrics_table} (
+                        metric_key VARCHAR(100) PRIMARY KEY,
+                        metric_value TEXT,
+                        metric_type ENUM('int', 'float', 'string', 'json') DEFAULT 'string',
+                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+                    ) ENGINE=InnoDB
+                """,
+                
+                # Real-time prices table
                 'real_time_prices': """
                     CREATE TABLE IF NOT EXISTS real_time_prices (
                         symbol VARCHAR(20) PRIMARY KEY,
@@ -265,6 +434,8 @@ class DatabaseManager:
                         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
                     ) ENGINE=InnoDB
                 """,
+                
+                # Positions table
                 'positions': """
                     CREATE TABLE IF NOT EXISTS positions (
                         position_id VARCHAR(100) PRIMARY KEY,
@@ -287,8 +458,55 @@ class DatabaseManager:
                     ) ENGINE=InnoDB
                 """
             }
-        else:  # SQLite schemas
+        else:  # SQLite schemas (simplified for compatibility)
             return {
+                # Raw tick data
+                ticks_table: f"""
+                    CREATE TABLE IF NOT EXISTS {ticks_table} (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        symbol TEXT NOT NULL,
+                        timestamp INTEGER NOT NULL,
+                        price REAL NOT NULL,
+                        volume REAL NOT NULL,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    )
+                """,
+                
+                # 1-second OHLC data
+                ohlc_1s_table: f"""
+                    CREATE TABLE IF NOT EXISTS {ohlc_1s_table} (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        symbol TEXT NOT NULL,
+                        timestamp INTEGER NOT NULL,
+                        open REAL NOT NULL,
+                        high REAL NOT NULL,
+                        low REAL NOT NULL,
+                        close REAL NOT NULL,
+                        volume REAL NOT NULL,
+                        tick_count INTEGER DEFAULT 1,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        UNIQUE(symbol, timestamp)
+                    )
+                """,
+                
+                # 1-minute OHLC data
+                ohlc_1m_table: f"""
+                    CREATE TABLE IF NOT EXISTS {ohlc_1m_table} (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        symbol TEXT NOT NULL,
+                        timestamp INTEGER NOT NULL,
+                        open REAL NOT NULL,
+                        high REAL NOT NULL,
+                        low REAL NOT NULL,
+                        close REAL NOT NULL,
+                        volume REAL NOT NULL,
+                        tick_count INTEGER DEFAULT 60,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        UNIQUE(symbol, timestamp)
+                    )
+                """,
+                
+                # Original market data table
                 market_table: f"""
                     CREATE TABLE IF NOT EXISTS {market_table} (
                         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -304,6 +522,48 @@ class DatabaseManager:
                         UNIQUE(symbol, timeframe, timestamp)
                     )
                 """,
+                
+                # Indicators cache
+                indicators_cache_table: f"""
+                    CREATE TABLE IF NOT EXISTS {indicators_cache_table} (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        symbol TEXT NOT NULL,
+                        timestamp INTEGER NOT NULL,
+                        indicator_name TEXT NOT NULL,
+                        indicator_value REAL,
+                        indicator_json TEXT,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    )
+                """,
+                
+                # Model training runs
+                training_runs_table: f"""
+                    CREATE TABLE IF NOT EXISTS {training_runs_table} (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        model_version INTEGER NOT NULL,
+                        training_started_at TIMESTAMP NOT NULL,
+                        training_completed_at TIMESTAMP,
+                        samples_count INTEGER,
+                        features_selected INTEGER,
+                        accuracy REAL,
+                        training_error TEXT,
+                        status TEXT DEFAULT 'started',
+                        config_json TEXT,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    )
+                """,
+                
+                # Model metrics
+                model_metrics_table: f"""
+                    CREATE TABLE IF NOT EXISTS {model_metrics_table} (
+                        metric_key TEXT PRIMARY KEY,
+                        metric_value TEXT,
+                        metric_type TEXT DEFAULT 'string',
+                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    )
+                """,
+                
+                # Real-time prices
                 'real_time_prices': """
                     CREATE TABLE IF NOT EXISTS real_time_prices (
                         symbol TEXT PRIMARY KEY,
@@ -316,6 +576,8 @@ class DatabaseManager:
                         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                     )
                 """,
+                
+                # Positions
                 'positions': """
                     CREATE TABLE IF NOT EXISTS positions (
                         position_id TEXT PRIMARY KEY,
