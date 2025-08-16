@@ -501,15 +501,13 @@ class IndicatorEngine:
             self.skipped_indicators = []  # Reset skipped indicators list
             self.computed_indicators = set()
             
-            # Add symbol if provided
             if symbol:
                 df = df.copy()
                 df['symbol'] = symbol
             
             logger.info(f"[INDICATORS] Calculating indicators for {len(df)} data points...")
             
-            # Calculate indicators in dependency order
-            max_iterations = 10  # Prevent infinite loops
+            max_iterations = 10
             iteration = 0
             
             while len(calculated) < len(self.indicator_functions) and iteration < max_iterations:
@@ -519,22 +517,13 @@ class IndicatorEngine:
                 for indicator_name, calc_function in self.indicator_functions.items():
                     if indicator_name in calculated:
                         continue
-                    
                     try:
-                        # Check if we have all prerequisites
                         if self.can_calculate_indicator(indicator_name, calculated, df):
                             result = calc_function(df)
-                            
-                            # Validate result
                             if result is None or (hasattr(result, '__len__') and len(result) == 0):
-                                self.skipped_indicators.append({
-                                    'name': indicator_name,
-                                    'reason': 'Empty or None result returned'
-                                })
+                                self.skipped_indicators.append({'name': indicator_name, 'reason': 'Empty or None result returned'})
                                 continue
-                            
                             if isinstance(result, dict):
-                                # Handle multi-output indicators
                                 for key, value in result.items():
                                     feature_name = f"{indicator_name}_{key}"
                                     results[feature_name] = value
@@ -542,62 +531,53 @@ class IndicatorEngine:
                             else:
                                 results[indicator_name] = result
                                 self.computed_indicators.add(indicator_name)
-                            
                             calculated.add(indicator_name)
-                            
                     except Exception as e:
-                        self.skipped_indicators.append({
-                            'name': indicator_name,
-                            'reason': f'Calculation error: {str(e)}'
-                        })
+                        self.skipped_indicators.append({'name': indicator_name,'reason': f'Calculation error: {str(e)}'})
                         logger.debug(f"[INDICATORS] Could not calculate {indicator_name}: {e}")
                         continue
-                
-                # If no progress was made, break to avoid infinite loop
                 if len(calculated) == initial_count:
                     break
             
-            # Mark remaining indicators as skipped due to missing dependencies
             for indicator_name in self.indicator_functions.keys():
                 if indicator_name not in calculated:
-                    self.skipped_indicators.append({
-                        'name': indicator_name,
-                        'reason': 'Missing dependencies or insufficient iterations'
-                    })
+                    self.skipped_indicators.append({'name': indicator_name,'reason': 'Missing dependencies or insufficient iterations'})
             
-            # Build final feature lists (OHLCV-only mode)
             self.must_keep_features = []
             self.rfe_candidates = []
             
-            # Always include BASE_MUST_KEEP_FEATURES first
+            # Case-insensitive mapping of computed indicators
+            computed_lower_map = {c.lower(): c for c in self.computed_indicators}
             try:
                 from config.settings import BASE_MUST_KEEP_FEATURES
                 for base_feature in BASE_MUST_KEEP_FEATURES:
-                    if base_feature in self.computed_indicators:
-                        self.must_keep_features.append(base_feature)
+                    lf = base_feature.lower()
+                    if lf in computed_lower_map:
+                        actual = computed_lower_map[lf]
+                        if actual not in self.must_keep_features:
+                            self.must_keep_features.append(actual)
             except ImportError:
-                # Fallback base features
-                for base_feature in ["open", "high", "low", "close", "volume"]:
-                    if base_feature in self.computed_indicators:
-                        self.must_keep_features.append(base_feature)
+                fallback = ["open", "high", "low", "close", "volume"]
+                for base_feature in fallback:
+                    lf = base_feature.lower()
+                    if lf in computed_lower_map:
+                        actual = computed_lower_map[lf]
+                        if actual not in self.must_keep_features:
+                            self.must_keep_features.append(actual)
             
             for feature_name in self.computed_indicators:
-                # Skip if already in must_keep from BASE_MUST_KEEP_FEATURES
                 if feature_name in self.must_keep_features:
                     continue
-                    
-                # Check if this feature corresponds to a must-keep indicator
                 base_indicator = feature_name.split('_')[0] if '_' in feature_name else feature_name
-                
-                if base_indicator in self.required_indicators:
+                base_lower = base_indicator.lower()
+                if base_lower in {r.lower(): r for r in self.required_indicators}:
                     self.must_keep_features.append(feature_name)
-                elif base_indicator in self.rfe_eligible_indicators:
+                elif base_lower in {r.lower(): r for r in self.rfe_eligible_indicators}:
                     self.rfe_candidates.append(feature_name)
-                # Core price data and prerequisites are always must-keep
-                elif feature_name.lower() in ['timestamp', 'symbol', 'prev close', 'prev high', 'prev low', 'typical price (tp)', 'median price (mp)', 'hlc3', 'ohlc4']:
+                elif feature_name.lower() in ['timestamp','symbol','prev close','prev high','prev low','typical price (tp)','median price (mp)','hlc3','ohlc4']:
                     self.must_keep_features.append(feature_name)
             
-            logger.success(f"[INDICATORS] Calculation completed:")
+            logger.success("[INDICATORS] Calculation completed")
             logger.info(f"[INDICATORS]   - Computed: {len(self.computed_indicators)}")
             logger.info(f"[INDICATORS]   - Must keep: {len(self.must_keep_features)}")
             logger.info(f"[INDICATORS]   - RFE candidates: {len(self.rfe_candidates)}")
@@ -605,13 +585,34 @@ class IndicatorEngine:
             
             if self.skipped_indicators:
                 logger.warning(f"[INDICATORS] {len(self.skipped_indicators)} indicators were skipped")
-                for skipped in self.skipped_indicators[:5]:  # Show first 5
+                for skipped in self.skipped_indicators[:5]:
                     logger.debug(f"[INDICATORS]   - {skipped['name']}: {skipped['reason']}")
                 if len(self.skipped_indicators) > 5:
                     logger.debug(f"[INDICATORS]   - ... and {len(self.skipped_indicators) - 5} more")
             
-            return results
+            # Build final DataFrame
+            features_df = df.copy()
+            added_cols = 0
+            for col_name, series in results.items():
+                try:
+                    features_df[col_name] = series
+                    added_cols += 1
+                except Exception as e:
+                    logger.debug(f"[INDICATORS] Failed attaching column {col_name}: {e}")
+            # Drop all-NaN
+            empty_cols = [c for c in features_df.columns if features_df[c].isna().all()]
+            if empty_cols:
+                features_df.drop(columns=empty_cols, inplace=True)
+                logger.debug(f"[INDICATORS] Dropped {len(empty_cols)} empty columns")
+            logger.info(f"[INDICATORS] Final features dataframe shape: {features_df.shape} (added {added_cols} indicator columns)")
             
+            return {
+                'dataframe': features_df,
+                'computed_features': sorted(list(self.computed_indicators)),
+                'must_keep_features': self.get_must_keep_features(),
+                'rfe_candidates': sorted(self.rfe_candidates),
+                'skipped': self.get_skipped_indicators()
+            }
         except Exception as e:
             logger.error(f"[INDICATORS] Failed to calculate indicators: {e}")
             return {}
@@ -659,20 +660,32 @@ class IndicatorEngine:
     # New methods for Complete Pipeline Restructure
     
     def get_must_keep_features(self) -> List[str]:
-        """Get final list of must-keep feature names after calculation (OHLCV-only mode)"""
-        # Always include BASE_MUST_KEEP_FEATURES
+        """Get final list of must-keep feature names after calculation (case-insensitive merge)"""
         try:
             from config.settings import BASE_MUST_KEEP_FEATURES
-            must_keep = BASE_MUST_KEEP_FEATURES.copy()
+            base_list = BASE_MUST_KEEP_FEATURES
         except ImportError:
-            must_keep = ["open", "high", "low", "close", "volume"]
+            base_list = ["open", "high", "low", "close", "volume"]
         
-        # Add computed must-keep features, avoiding duplicates
-        for feature in self.must_keep_features:
-            if feature.lower() not in [f.lower() for f in must_keep]:
-                must_keep.append(feature)
-                
-        return must_keep
+        # Map of lowercase -> original computed name if exists
+        computed_map = {c.lower(): c for c in self.must_keep_features}
+        ordered = []
+        # First, base order
+        for b in base_list:
+            lb = b.lower()
+            if lb in computed_map:
+                name = computed_map[lb]
+                if name not in ordered:
+                    ordered.append(name)
+            else:
+                # If base not computed (rare), still record lowercase base to keep semantics
+                if b not in ordered:
+                    ordered.append(b)
+        # Then other must_keep features preserving insertion order
+        for f in self.must_keep_features:
+            if f not in ordered:
+                ordered.append(f)
+        return ordered
     
     def get_rfe_candidates(self) -> List[str]:
         """Get final list of RFE candidate feature names after calculation"""
