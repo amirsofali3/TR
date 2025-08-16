@@ -12,6 +12,9 @@ from concurrent.futures import ThreadPoolExecutor
 from dotenv import load_dotenv
 load_dotenv()
 
+# Import pandas for label generation in training methods
+import pandas as pd
+
 # Handle missing loguru gracefully
 try:
     from loguru import logger
