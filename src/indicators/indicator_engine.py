@@ -75,6 +75,55 @@ class IndicatorEngine:
                 logger.debug(f"[INDICATORS] Added to RFE set: {sanitized_name}")
         
         logger.info(f"[INDICATORS] Built classification sets - Must-keep: {len(self.must_keep_indicator_set)}, RFE-eligible: {len(self.rfe_indicator_set)}")
+    
+    def _extract_base_indicator_name(self, feature_name: str) -> str:
+        """Extract base indicator name from feature name, handling complex cases like Stoch_%K_5, Williams_%R_14"""
+        if not feature_name:
+            return ""
+        
+        # Handle special cases with % signs first
+        if '%' in feature_name:
+            # Cases like "Stoch_%K_5", "Williams_%R_14" 
+            # Try to find the longest match from our known indicators
+            sanitized_feature = self._sanitize_indicator_name(feature_name)
+            
+            # Direct match first
+            if sanitized_feature in self.must_keep_indicator_set or sanitized_feature in self.rfe_indicator_set:
+                return sanitized_feature
+                
+            # Try progressive splitting for complex names
+            parts = feature_name.split('_')
+            for i in range(len(parts), 0, -1):
+                potential_base = '_'.join(parts[:i])
+                sanitized_base = self._sanitize_indicator_name(potential_base)
+                if sanitized_base in self.must_keep_indicator_set or sanitized_base in self.rfe_indicator_set:
+                    return sanitized_base
+        
+        # Standard processing for names with underscores
+        if '_' in feature_name:
+            parts = feature_name.split('_')
+            if len(parts) >= 2:
+                # First try first part only
+                potential_base = parts[0]
+                sanitized_base = self._sanitize_indicator_name(potential_base)
+                if sanitized_base in self.must_keep_indicator_set or sanitized_base in self.rfe_indicator_set:
+                    return sanitized_base
+                
+                # Then try first two parts joined
+                potential_base = '_'.join(parts[:2])
+                sanitized_base = self._sanitize_indicator_name(potential_base)
+                if sanitized_base in self.must_keep_indicator_set or sanitized_base in self.rfe_indicator_set:
+                    return sanitized_base
+                
+                # Finally try the whole name minus last part (for cases like "SuperTrend_ATR14_M2")
+                if len(parts) > 2:
+                    potential_base = '_'.join(parts[:-1])
+                    sanitized_base = self._sanitize_indicator_name(potential_base)
+                    if sanitized_base in self.must_keep_indicator_set or sanitized_base in self.rfe_indicator_set:
+                        return sanitized_base
+        
+        # Return sanitized full name as fallback
+        return self._sanitize_indicator_name(feature_name)
         
     async def initialize(self):
         """Initialize the indicator engine"""
@@ -582,25 +631,9 @@ class IndicatorEngine:
             # Phase 2: Build classification map for improved feature categorization
             classification_map = {}
             for feature_name in self.computed_indicators:
-                # Improved base indicator extraction - handle multi-output indicators
-                if '_' in feature_name:
-                    # For multi-output indicators like "MACD_signal", "BB_upper", extract base name
-                    parts = feature_name.split('_')
-                    if len(parts) >= 2:
-                        # Check if first part matches a known indicator from CSV
-                        potential_base = parts[0]
-                        sanitized_base = self._sanitize_indicator_name(potential_base)
-                        if sanitized_base in self.must_keep_indicator_set or sanitized_base in self.rfe_indicator_set:
-                            classification_map[feature_name] = sanitized_base
-                        else:
-                            # Fallback: try first two parts joined
-                            potential_base = '_'.join(parts[:2])
-                            sanitized_base = self._sanitize_indicator_name(potential_base)
-                            classification_map[feature_name] = sanitized_base
-                    else:
-                        classification_map[feature_name] = self._sanitize_indicator_name(feature_name)
-                else:
-                    classification_map[feature_name] = self._sanitize_indicator_name(feature_name)
+                # Improved base indicator extraction - handle multi-output indicators and special characters
+                base_indicator = self._extract_base_indicator_name(feature_name)
+                classification_map[feature_name] = base_indicator
             
             # Phase 3: Classify features into must-keep and RFE candidates  
             self.must_keep_features = []
