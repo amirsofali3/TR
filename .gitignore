@@ -75,5 +75,7 @@ test.log
 *.pkl
 *.joblib
 *.model
-*.csv
 *.json
+
+# Test files
+test_ohlcv_*.py

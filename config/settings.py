@@ -5,14 +5,14 @@ BINANCE_API_KEY = "your_binance_api_key_here"
 BINANCE_SECRET_KEY = "your_binance_secret_key_here"
 
 # Trading Configuration
-DEFAULT_TIMEFRAME = "4h"  # Default timeframe for analysis
+DEFAULT_TIMEFRAME = "1m"  # Default timeframe for analysis (OHLCV-only mode)
 UPDATE_INTERVAL = 60  # Update interval in seconds (1 minute)
 CONFIDENCE_THRESHOLD = 70.0  # Minimum confidence for trade execution
 MAX_POSITIONS = 10  # Maximum number of open positions
 
-# Supported Cryptocurrencies (limited for testing)
+# Supported Cryptocurrencies (OHLCV-only mode)
 SUPPORTED_PAIRS = [
-    "BTCUSDT", "ETHUSDT", "DOGEUSDT"
+    "BTCUSDT", "ETHUSDT", "SOLUSDT", "DOGEUSDT"
 ]
 
 # Database Configuration
@@ -29,12 +29,12 @@ MYSQL_DB = "trading_system"
 MYSQL_CHARSET = "utf8mb4"
 MYSQL_TIMEZONE = "+00:00"
 
-# Machine Learning Configuration
+# Machine Learning Configuration (OHLCV-only mode)
 ML_LOOKBACK_PERIODS = 500  # Number of recent candles for RFE selection
 CATBOOST_ITERATIONS = 1000
 CATBOOST_DEPTH = 10
 CATBOOST_LEARNING_RATE = 0.1
-RFE_N_FEATURES = 50  # Number of features to select with RFE
+RFE_N_FEATURES = 25  # Number of features to select with RFE (reduced for OHLCV-only)
 
 # ML Training Pipeline Configuration (MySQL migration)
 MIN_INITIAL_TRAIN_SAMPLES = 400  # Minimum samples required for initial training
@@ -80,12 +80,18 @@ MAX_HISTORICAL_DAYS = 365  # Maximum days of historical data to fetch
 DATA_UPDATE_INTERVAL = 3600  # Update historical data every hour
 
 # Bootstrap Data Collection Configuration (Complete Pipeline Restructure)
-INITIAL_COLLECTION_DURATION_SEC = 3600  # Default 1 hour for bootstrap collection
-INITIAL_COLLECTION_TIMEFRAME = "1s"  # Raw tick collection timeframe
+INITIAL_COLLECTION_DURATION_SEC = 0  # No bootstrap collection in OHLCV-only mode
+INITIAL_COLLECTION_TIMEFRAME = "1s"  # Raw tick collection timeframe (legacy)
 ONLINE_RETRAIN_INTERVAL_SEC = 900  # 15 minutes between automatic retrains
 MIN_NEW_SAMPLES_FOR_RETRAIN = 300  # Minimum new samples to trigger retrain
 ACCURACY_SLIDING_WINDOW = 1000  # Number of recent predictions for live accuracy
 ACCURACY_UPDATE_INTERVAL_SEC = 60  # Update live accuracy every 60 seconds
+
+# OHLCV-only Mode Configuration
+INDICATOR_CSV_PATH = "ohlcv_only_indicators.csv"  # Path to OHLCV-only indicators CSV
+ENABLE_TICK_BOOTSTRAP = False  # Disable tick-based bootstrap entirely
+RFE_SELECTION_CANDLES = 1000  # Recent candles window for RFE selection
+BASE_MUST_KEEP_FEATURES = ["open", "high", "low", "close", "volume"]  # Base OHLCV features always kept
 
 # Data Collection & Analysis Separation (User Feedback Adjustments)
 RAW_COLLECTION_INTERVAL_SEC = 1  # Fixed raw data collection interval
