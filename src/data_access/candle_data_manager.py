@@ -159,8 +159,9 @@ class CandleDataManager:
             if db_manager.backend == 'mysql':
                 if recent_only:
                     # Get recent candles per symbol
+                    # NOTE: Explicitly select only required 8 columns to avoid rn column mismatch in DataFrame
                     base_sql = f"""
-                    SELECT * FROM (
+                    SELECT symbol, timestamp, open, high, low, close, volume, datetime FROM (
                         SELECT symbol, timestamp, open, high, low, close, volume, datetime,
                                ROW_NUMBER() OVER (PARTITION BY symbol ORDER BY timestamp DESC) as rn
                         FROM {self.candles_table}
@@ -181,8 +182,9 @@ class CandleDataManager:
             else:
                 # SQLite version
                 if recent_only:
+                    # NOTE: Explicitly select only required 8 columns to avoid rn column mismatch in DataFrame
                     base_sql = f"""
-                    SELECT * FROM (
+                    SELECT symbol, timestamp, open, high, low, close, volume, datetime FROM (
                         SELECT symbol, timestamp, open, high, low, close, volume, datetime,
                                ROW_NUMBER() OVER (PARTITION BY symbol ORDER BY timestamp DESC) as rn
                         FROM {self.candles_table}
@@ -223,6 +225,11 @@ class CandleDataManager:
                 return pd.DataFrame()
             
             # Convert to DataFrame
+            # Defensive safeguard: if results have unexpected extra columns (e.g., rn), strip them
+            if results and len(results[0]) > 8:
+                logger.warning(f"[CANDLES] Query returned {len(results[0])} columns, expected 8. Trimming extra columns.")
+                results = [row[:8] for row in results]
+            
             df = pd.DataFrame(results, columns=[
                 'symbol', 'timestamp', 'open', 'high', 'low', 'close', 'volume', 'datetime'
             ])
@@ -258,11 +265,16 @@ class CandleDataManager:
                 if count == 0:
                     logger.warning(f"[CANDLES] No data found for symbol: {symbol}")
                 else:
-                    logger.debug(f"[CANDLES] {symbol}: {count} candles")
+                    # Enhanced logging for recent window loads - reuse existing pattern
+                    if recent_only:
+                        logger.info(f"[CANDLES] Recent window - {symbol}: {count} candles")
+                    else:
+                        logger.debug(f"[CANDLES] {symbol}: {count} candles")
                     
                     # Safeguard: Check for reasonable data distribution
                     if count < 100:
                         logger.warning(f"[CANDLES] Symbol {symbol} has very few candles: {count}")
+            
             
             return df
             
