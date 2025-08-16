@@ -1008,7 +1008,7 @@ class TradingEngine:
             must_keep_features = self.indicator_engine.get_must_keep_features()
             rfe_candidates = self.indicator_engine.get_rfe_candidates()
             
-            # Categorize features
+            # Categorize features with case-insensitive matching
             base_ohlcv = []
             must_keep_other = []
             rfe_selected = []
@@ -1016,25 +1016,32 @@ class TradingEngine:
             
             try:
                 from config.settings import BASE_MUST_KEEP_FEATURES
-                base_features = BASE_MUST_KEEP_FEATURES
+                base_features = BASE_MUST_KEEP_FEATURES + ['timestamp', 'symbol']  # Include meta features
             except ImportError:
-                base_features = ["open", "high", "low", "close", "volume"]
-            base_lower = {b.lower() for b in base_features}
-            must_keep_lower = {m.lower() for m in must_keep_features}
-            rfe_candidates_lower = {r.lower() for r in rfe_candidates}
+                base_features = ["open", "high", "low", "close", "volume", "timestamp", "symbol"]
+            
+            # Create case-insensitive lookup sets
+            base_lower = {b.lower().strip() for b in base_features}
+            must_keep_lower = {m.lower().strip() for m in must_keep_features}
+            rfe_candidates_lower = {r.lower().strip() for r in rfe_candidates}
+            
+            # Helper function for case-insensitive feature name sanitization
+            def sanitize_feature_name(name: str) -> str:
+                """Sanitize feature name for consistent matching"""
+                return name.lower().strip()
             
             for feature in selected_features:
-                lf = feature.lower()
-                if lf in base_lower:
+                sanitized_feature = sanitize_feature_name(feature)
+                if sanitized_feature in base_lower:
                     base_ohlcv.append(feature)
-                elif lf in must_keep_lower:
+                elif sanitized_feature in must_keep_lower:
                     must_keep_other.append(feature)
-                elif lf in rfe_candidates_lower:
+                elif sanitized_feature in rfe_candidates_lower:
                     rfe_selected.append(feature)
             
             for feature in inactive_features:
-                lf = feature.lower()
-                if lf in rfe_candidates_lower:
+                sanitized_feature = sanitize_feature_name(feature)
+                if sanitized_feature in rfe_candidates_lower:
                     rfe_not_selected.append(feature)
             
             return {

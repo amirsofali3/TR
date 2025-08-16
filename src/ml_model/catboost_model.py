@@ -151,6 +151,30 @@ class CatBoostTradingModel:
                     
                     logger.info(f"[TRAIN] Found non-numeric column '{column}' with {unique_count} unique values")
                     
+                    # Special handling for symbol column - encode or drop
+                    if column.lower() == 'symbol':
+                        logger.info(f"[TRAIN] Processing symbol column: {column}")
+                        if unique_count <= 1:
+                            # Constant symbol - drop it as it provides no information
+                            logger.info(f"[TRAIN] Dropping constant symbol column: {column} (value: {unique_values[0] if len(unique_values) > 0 else 'N/A'})")
+                            sanitized_df = sanitized_df.drop(columns=[column])
+                            dropped_features.append(f"{column} (constant_symbol)")
+                        elif unique_count <= 50:  # Reasonable number of symbols for encoding
+                            # Encode symbol to numerical codes
+                            from sklearn.preprocessing import LabelEncoder
+                            le = LabelEncoder()
+                            symbol_codes = le.fit_transform(col_data.astype(str))
+                            sanitized_df[f'{column}_code'] = symbol_codes
+                            sanitized_df = sanitized_df.drop(columns=[column])
+                            converted_features.append(f"{column} → {column}_code (symbol_encoded)")
+                            logger.info(f"[TRAIN] Encoded symbol column {column} to {column}_code with {unique_count} categories")
+                        else:
+                            # Too many symbols - drop it
+                            logger.info(f"[TRAIN] Dropping high-cardinality symbol column: {column} ({unique_count} symbols)")
+                            sanitized_df = sanitized_df.drop(columns=[column])
+                            dropped_features.append(f"{column} (high_cardinality_symbol)")
+                        continue
+                    
                     # Drop constant columns (only one unique value)
                     if unique_count <= 1:
                         logger.info(f"[TRAIN] Dropping constant column: {column}")
@@ -227,8 +251,8 @@ class CatBoostTradingModel:
                 'initial_feature_count': initial_feature_count,
                 'final_feature_count': final_feature_count,
                 'dropped_constant': len([f for f in dropped_features if 'constant' in str(f)]),
-                'dropped_high_cardinality': len([f for f in dropped_features if 'high-cardinality' in str(f)]),
-                'encoded_categorical': len([f for f in converted_features if 'label_encoded' in f]),
+                'dropped_high_cardinality': len([f for f in dropped_features if 'high-cardinality' in str(f) or 'high_cardinality' in str(f)]),
+                'encoded_categorical': len([f for f in converted_features if 'label_encoded' in f or 'symbol_encoded' in f]),
                 'converted_numeric': len([f for f in converted_features if 'to_numeric' in f or 'forced_numeric' in f]),
                 'samples_before': rows_before,
                 'samples_after': rows_after
