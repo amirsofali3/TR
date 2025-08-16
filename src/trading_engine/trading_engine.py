@@ -1019,17 +1019,22 @@ class TradingEngine:
                 base_features = BASE_MUST_KEEP_FEATURES
             except ImportError:
                 base_features = ["open", "high", "low", "close", "volume"]
+            base_lower = {b.lower() for b in base_features}
+            must_keep_lower = {m.lower() for m in must_keep_features}
+            rfe_candidates_lower = {r.lower() for r in rfe_candidates}
             
             for feature in selected_features:
-                if feature in base_features:
+                lf = feature.lower()
+                if lf in base_lower:
                     base_ohlcv.append(feature)
-                elif feature in must_keep_features:
+                elif lf in must_keep_lower:
                     must_keep_other.append(feature)
-                elif feature in rfe_candidates:
+                elif lf in rfe_candidates_lower:
                     rfe_selected.append(feature)
             
             for feature in inactive_features:
-                if feature in rfe_candidates:
+                lf = feature.lower()
+                if lf in rfe_candidates_lower:
                     rfe_not_selected.append(feature)
             
             return {
