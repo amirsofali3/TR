@@ -47,6 +47,35 @@ class IndicatorEngine:
         self.must_keep_features = []  # Final list of must-keep feature names
         self.rfe_candidates = []  # Final list of RFE candidate feature names
         
+        # Classification sets for improved must-keep and RFE detection
+        self.must_keep_indicator_set = set()  # Case-insensitive must-keep indicator names
+        self.rfe_indicator_set = set()  # Case-insensitive RFE-eligible indicator names
+    
+    def _sanitize_indicator_name(self, name: str) -> str:
+        """Sanitize indicator name for consistent matching (case-insensitive, normalized)"""
+        if not name:
+            return ""
+        # Convert to lowercase and strip whitespace
+        return name.lower().strip()
+    
+    def _build_indicator_classification_sets(self):
+        """Build case-insensitive classification sets from loaded CSV configuration"""
+        self.must_keep_indicator_set.clear()
+        self.rfe_indicator_set.clear()
+        
+        for indicator_name, config in self.indicators_config.items():
+            sanitized_name = self._sanitize_indicator_name(indicator_name)
+            
+            if config.get('must_keep', False):
+                self.must_keep_indicator_set.add(sanitized_name)
+                logger.debug(f"[INDICATORS] Added to must-keep set: {sanitized_name}")
+            
+            if config.get('rfe_eligible', False):
+                self.rfe_indicator_set.add(sanitized_name)
+                logger.debug(f"[INDICATORS] Added to RFE set: {sanitized_name}")
+        
+        logger.info(f"[INDICATORS] Built classification sets - Must-keep: {len(self.must_keep_indicator_set)}, RFE-eligible: {len(self.rfe_indicator_set)}")
+        
     async def initialize(self):
         """Initialize the indicator engine"""
         try:
@@ -137,6 +166,9 @@ class IndicatorEngine:
             logger.info(f"[INDICATORS]   - Must keep: {must_keep_count}")
             logger.info(f"[INDICATORS]   - RFE eligible: {rfe_eligible_count}")
             logger.info(f"[INDICATORS]   - With prerequisites: {len(self.prerequisite_map)}")
+            
+            # Build classification sets after loading configuration
+            self._build_indicator_classification_sets()
             
         except FileNotFoundError:
             logger.error(f"[INDICATORS] OHLCV indicators CSV file not found at {csv_path}")
@@ -237,6 +269,9 @@ class IndicatorEngine:
         
         logger.info(f"[INDICATORS] Using default OHLCV-only configuration with {len(default_ohlcv_indicators)} indicators")
         logger.info(f"[INDICATORS] Must keep: {len(self.required_indicators)}, RFE eligible: {len(self.rfe_eligible_indicators)}")
+        
+        # Build classification sets after setting up default configuration
+        self._build_indicator_classification_sets()
     
     def setup_indicator_functions(self):
         """Setup functions for calculating indicators"""
@@ -510,6 +545,7 @@ class IndicatorEngine:
             max_iterations = 10
             iteration = 0
             
+            # Phase 1: Calculate all indicators
             while len(calculated) < len(self.indicator_functions) and iteration < max_iterations:
                 iteration += 1
                 initial_count = len(calculated)
@@ -543,39 +579,81 @@ class IndicatorEngine:
                 if indicator_name not in calculated:
                     self.skipped_indicators.append({'name': indicator_name,'reason': 'Missing dependencies or insufficient iterations'})
             
+            # Phase 2: Build classification map for improved feature categorization
+            classification_map = {}
+            for feature_name in self.computed_indicators:
+                # Improved base indicator extraction - handle multi-output indicators
+                if '_' in feature_name:
+                    # For multi-output indicators like "MACD_signal", "BB_upper", extract base name
+                    parts = feature_name.split('_')
+                    if len(parts) >= 2:
+                        # Check if first part matches a known indicator from CSV
+                        potential_base = parts[0]
+                        sanitized_base = self._sanitize_indicator_name(potential_base)
+                        if sanitized_base in self.must_keep_indicator_set or sanitized_base in self.rfe_indicator_set:
+                            classification_map[feature_name] = sanitized_base
+                        else:
+                            # Fallback: try first two parts joined
+                            potential_base = '_'.join(parts[:2])
+                            sanitized_base = self._sanitize_indicator_name(potential_base)
+                            classification_map[feature_name] = sanitized_base
+                    else:
+                        classification_map[feature_name] = self._sanitize_indicator_name(feature_name)
+                else:
+                    classification_map[feature_name] = self._sanitize_indicator_name(feature_name)
+            
+            # Phase 3: Classify features into must-keep and RFE candidates  
             self.must_keep_features = []
             self.rfe_candidates = []
             
-            # Case-insensitive mapping of computed indicators
-            computed_lower_map = {c.lower(): c for c in self.computed_indicators}
+            # Always include base OHLCV features in must_keep, even if not computed by indicators
             try:
                 from config.settings import BASE_MUST_KEEP_FEATURES
-                for base_feature in BASE_MUST_KEEP_FEATURES:
-                    lf = base_feature.lower()
-                    if lf in computed_lower_map:
-                        actual = computed_lower_map[lf]
-                        if actual not in self.must_keep_features:
-                            self.must_keep_features.append(actual)
+                base_features = BASE_MUST_KEEP_FEATURES + ['timestamp', 'symbol']  # Include meta features
             except ImportError:
-                fallback = ["open", "high", "low", "close", "volume"]
-                for base_feature in fallback:
-                    lf = base_feature.lower()
-                    if lf in computed_lower_map:
-                        actual = computed_lower_map[lf]
-                        if actual not in self.must_keep_features:
-                            self.must_keep_features.append(actual)
+                base_features = ["open", "high", "low", "close", "volume", "timestamp", "symbol"]
             
+            # Map base features to actual computed feature names (case-insensitive)
+            computed_lower_map = {self._sanitize_indicator_name(c): c for c in self.computed_indicators}
+            original_columns_lower = {self._sanitize_indicator_name(c): c for c in df.columns}
+            
+            for base_feature in base_features:
+                sanitized_base = self._sanitize_indicator_name(base_feature)
+                actual_feature_name = None
+                
+                # First try to find in computed indicators
+                if sanitized_base in computed_lower_map:
+                    actual_feature_name = computed_lower_map[sanitized_base]
+                # Fall back to original DataFrame columns
+                elif sanitized_base in original_columns_lower:
+                    actual_feature_name = original_columns_lower[sanitized_base]
+                    # Add to computed indicators if found in original columns
+                    self.computed_indicators.add(actual_feature_name)
+                
+                if actual_feature_name and actual_feature_name not in self.must_keep_features:
+                    self.must_keep_features.append(actual_feature_name)
+                    logger.debug(f"[INDICATORS] Added base feature to must-keep: {actual_feature_name}")
+            
+            # Classify computed features using improved classification
             for feature_name in self.computed_indicators:
                 if feature_name in self.must_keep_features:
-                    continue
-                base_indicator = feature_name.split('_')[0] if '_' in feature_name else feature_name
-                base_lower = base_indicator.lower()
-                if base_lower in {r.lower(): r for r in self.required_indicators}:
+                    continue  # Already classified as must-keep
+                    
+                base_indicator = classification_map.get(feature_name, self._sanitize_indicator_name(feature_name))
+                
+                if base_indicator in self.must_keep_indicator_set:
                     self.must_keep_features.append(feature_name)
-                elif base_lower in {r.lower(): r for r in self.rfe_eligible_indicators}:
+                    logger.debug(f"[INDICATORS] Classified as must-keep: {feature_name} (base: {base_indicator})")
+                elif base_indicator in self.rfe_indicator_set:
                     self.rfe_candidates.append(feature_name)
-                elif feature_name.lower() in ['timestamp','symbol','prev close','prev high','prev low','typical price (tp)','median price (mp)','hlc3','ohlc4']:
-                    self.must_keep_features.append(feature_name)
+                    logger.debug(f"[INDICATORS] Classified as RFE candidate: {feature_name} (base: {base_indicator})")
+                else:
+                    # Default: add to RFE candidates if not explicitly must-keep
+                    self.rfe_candidates.append(feature_name)
+                    logger.debug(f"[INDICATORS] Defaulting to RFE candidate: {feature_name} (base: {base_indicator})")
+            
+            # Ensure RFE candidates exclude must-keep features
+            self.rfe_candidates = [f for f in self.rfe_candidates if f not in self.must_keep_features]
             
             logger.success("[INDICATORS] Calculation completed")
             logger.info(f"[INDICATORS]   - Computed: {len(self.computed_indicators)}")
@@ -590,21 +668,23 @@ class IndicatorEngine:
                 if len(self.skipped_indicators) > 5:
                     logger.debug(f"[INDICATORS]   - ... and {len(self.skipped_indicators) - 5} more")
             
-            # Build final DataFrame
-            features_df = df.copy()
-            added_cols = 0
-            for col_name, series in results.items():
-                try:
-                    features_df[col_name] = series
-                    added_cols += 1
-                except Exception as e:
-                    logger.debug(f"[INDICATORS] Failed attaching column {col_name}: {e}")
-            # Drop all-NaN
+            # Phase 4: Build final DataFrame with single concat to avoid fragmentation warnings
+            if results:
+                # Create indicators DataFrame from results
+                indicators_df = pd.DataFrame(results, index=df.index)
+                
+                # Combine original data with indicators using concat
+                features_df = pd.concat([df, indicators_df], axis=1)
+            else:
+                features_df = df.copy()
+                
+            # Drop all-NaN columns
             empty_cols = [c for c in features_df.columns if features_df[c].isna().all()]
             if empty_cols:
                 features_df.drop(columns=empty_cols, inplace=True)
                 logger.debug(f"[INDICATORS] Dropped {len(empty_cols)} empty columns")
-            logger.info(f"[INDICATORS] Final features dataframe shape: {features_df.shape} (added {added_cols} indicator columns)")
+                
+            logger.info(f"[INDICATORS] Final features dataframe shape: {features_df.shape} (added {len(results)} indicator columns)")
             
             return {
                 'dataframe': features_df,
