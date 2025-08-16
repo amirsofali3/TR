@@ -1,4 +1,11 @@
 Indicator,Category,Required Inputs,Formula / Calculation,Must Keep (Not in RFE),RFE Eligible,Prerequisite For,Parameters,Outputs
+Timestamp,Core Price Data,timestamp,Raw timestamp,Yes,No,,,
+Open,Core Price Data,open,Raw market open price,Yes,No,,,
+High,Core Price Data,high,Raw market high price,Yes,No,,,
+Low,Core Price Data,low,Raw market low price,Yes,No,,,
+Close,Core Price Data,close,Raw market close price,Yes,No,,,
+Volume,Core Price Data,volume,Raw market volume,Yes,No,,,
+Symbol,Core Meta,symbol,Asset identifier,Yes,No,,,
 Prev Close,Prereq,close,Previous close (lag 1),No,Yes,"Returns, RSI, ATR",lag=1,
 Prev High,Prereq,high,Previous high (lag 1),No,Yes,"ATR, True Range",lag=1,
 Prev Low,Prereq,low,Previous low (lag 1),No,Yes,"ATR, True Range",lag=1,
