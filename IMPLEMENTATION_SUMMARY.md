@@ -1,5 +1,36 @@
 # OHLCV Classification & Symbol Encoding Fixes - Implementation Summary
 
+## Phase 2 Fixes (Second Round) ✅
+
+### A. Enhanced CatBoost Model Training
+
+**1. Feature Sanitization Integration** ✅
+- **Issue**: Symbol encoding and RFE selection errors due to non-numeric features
+- **Solution**: 
+  - Enhanced `_sanitize_features()` to store stats in `self.last_sanitization_stats`
+  - Added early sanitization in `train_model()` for both X and X_recent before any processing
+  - Added sanitization in `perform_rfe_selection()` before filtering rfe_features
+  - Added sanitization in `select_features_by_importance()` fallback method
+
+**2. CatBoost Train Directory Configuration** ✅
+- **Issue**: RFE selection error "Can't create train working dir: catboost_info"
+- **Solution**:
+  - Added dedicated temporary directories: `catboost_rfe_tmp`, `catboost_importance_tmp`
+  - Set `train_dir`, `allow_writing_files=True`, `verbose=False` for all temporary models
+  - Used `os.makedirs(..., exist_ok=True)` for directory creation
+
+**3. Symbol Encoding Pipeline** ✅  
+- **Issue**: String symbol column causing "Cannot convert 'ETHUSDT' to float" errors
+- **Solution**: Symbol sanitization now happens before any model training or RFE selection
+
+### B. Indicator Engine Verification ✅
+- **Status**: Base OHLCV features (open, high, low, close, volume, timestamp, symbol) already properly included in must-keep from Phase 1
+
+### C. Trading Engine UI Features ✅
+- **Status**: Case-insensitive OHLCV feature categorization already implemented with timestamp & symbol support
+
+## Phase 1 Fixes (Previous Implementation)
+
 ## Issues Fixed
 
 ### 1. Must-Keep Detection Issues ✅
@@ -86,7 +117,27 @@ base_features = BASE_MUST_KEEP_FEATURES + ['timestamp', 'symbol']
 
 ## Expected Behavior Changes
 
-### Before Fix:
+### Phase 2 - Before Fix:
+```
+[TRAIN] RFE selection failed: Can't create train working dir: catboost_info
+[TRAIN] Feature importance selection failed: Bad value for num_feature ... "ETHUSDT": Cannot convert 'b'ETHUSDT'' to float
+[TRAIN] Initial model training failed due to string symbol column
+UI Active Indicators still shows limited features (selected_features stays empty)
+```
+
+### Phase 2 - After Fix:
+```
+[TRAIN] Sanitizing main training features...
+[TRAIN] Main sanitization: 145 → 144 features
+[TRAIN] Encoded symbol column symbol to symbol_code with 4 categories
+[TRAIN] Sanitizing RFE window features...
+[TRAIN] RFE sanitization: 144 → 144 features
+[TRAIN] RFE selected 25 features out of 137 eligible
+[TRAIN] Selected feature count equals Must keep + target RFE features (7 + 25 = 32)
+UI shows Active Features > 0 and Feature Selection Summary populated
+```
+
+### Phase 1 - Before Fix:
 ```
 [INDICATORS] Computed: 145, Must keep: 2, RFE candidates: 0
 [TRAIN] No RFE-eligible features found  
@@ -95,7 +146,7 @@ UI shows only Timestamp & Volume as active indicators
 PerformanceWarning: DataFrame is highly fragmented
 ```
 
-### After Fix:
+### Phase 1 - After Fix:
 ```
 [INDICATORS] Computed: 145, Must keep: ≥7, RFE candidates: >0  
 [TRAIN] RFE selected N features out of M eligible
@@ -106,6 +157,14 @@ No pandas fragmentation warnings
 
 ## Validation Steps
 
+### Phase 2 Acceptance Criteria ✅
+1. **RFE Stage Completion**: RFE stage completes (or falls back) without catboost_info directory error
+2. **Symbol Encoding**: No string conversion errors in training (symbol encoded or dropped)  
+3. **Feature Count**: Selected feature count equals Must keep + target RFE features (e.g., 7 + 25 = 32) or fewer if limited by available features
+4. **UI Display**: UI shows Active Features > 0 and Feature Selection Summary populated
+5. **Sanitization Stats**: Sanitization stats logged with counts (stored in self.last_sanitization_stats)
+
+### Phase 1 Validation ✅
 1. **Must-Keep Count**: Should be ≥7 (base OHLCV + timestamp + symbol)
 2. **RFE Candidates**: Should be >0 with majority of computed indicators
 3. **RFE Training**: No "No RFE-eligible features found" warnings
@@ -114,6 +173,11 @@ No pandas fragmentation warnings
 6. **Performance**: No pandas DataFrame fragmentation warnings
 
 ## Files Modified
+
+### Phase 2 Changes
+- `src/ml_model/catboost_model.py` - Enhanced feature sanitization integration, CatBoost train_dir configuration
+
+### Phase 1 Changes  
 - `src/indicators/indicator_engine.py` - Core classification logic
 - `src/ml_model/catboost_model.py` - Symbol handling in sanitization  
 - `src/trading_engine/trading_engine.py` - UI categorization with case-insensitive matching
