@@ -392,17 +392,27 @@ class TradingSystem:
             raise
     
     async def load_and_prepare_ohlcv_data(self):
-        """Load historical OHLCV data and prepare for indicator calculation"""
+        """Load historical OHLCV data and prepare for indicator calculation (FIXED)"""
         try:
             from src.data_access.candle_data_manager import candle_data_manager
             
             logger.info("[OHLCV] Loading full historical OHLCV data...")
             
-            # Load full historical data for all supported pairs
+            # Try to load full historical data from candles table
             full_data = await candle_data_manager.get_full_historical_data(SUPPORTED_PAIRS)
             
             if full_data.empty:
-                raise ValueError("No historical OHLCV data available")
+                logger.warning("[OHLCV] No historical OHLCV data found in candles table")
+                logger.info("[OHLCV] Loading historical data from Binance API...")
+                
+                # Load historical data from API first
+                await self.data_collector.load_historical_data_to_candles(SUPPORTED_PAIRS, 30)  # 30 days
+                
+                # Try again to load from candles table
+                full_data = await candle_data_manager.get_full_historical_data(SUPPORTED_PAIRS)
+                
+                if full_data.empty:
+                    raise ValueError("Failed to load historical OHLCV data from API")
             
             logger.info(f"[OHLCV] Loaded {len(full_data)} historical candles")
             
@@ -546,9 +556,13 @@ class TradingSystem:
         logger.info("[TRAIN] This method is kept for backward compatibility only")
     
     async def start_trading_operations(self):
-        """Start trading operations and online learning"""
+        """Start trading operations and online learning with real-time data updates (FIXED)"""
         try:
-            logger.info("[ONLINE] Starting trading operations...")
+            logger.info("[ONLINE] Starting trading operations with real-time data updates...")
+            
+            # Start real-time data collection in background
+            logger.info("[ONLINE] Starting real-time data collection...")
+            asyncio.create_task(self.data_collector.start_realtime_data_collection())
             
             # Start online learning if model is trained
             if self.ml_model.is_trained:
@@ -561,7 +575,7 @@ class TradingSystem:
             else:
                 logger.info("[ONLINE] Model not trained - skipping online learning")
             
-            logger.success("[ONLINE] Trading operations started")
+            logger.success("[ONLINE] Trading operations started with real-time data updates")
             
         except Exception as e:
             logger.error(f"[ONLINE] Failed to start trading operations: {e}")

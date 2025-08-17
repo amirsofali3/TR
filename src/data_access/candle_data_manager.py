@@ -337,6 +337,116 @@ class CandleDataManager:
                 validation_results[symbol] = False
         
         return validation_results
+    
+    async def update_realtime_candle(self, symbol: str, timestamp: int, open_price: float, high_price: float, low_price: float, close_price: float, volume: float):
+        """Update or insert a single candle in real-time (NEW)"""
+        try:
+            # Convert timestamp to datetime for MySQL
+            dt = datetime.fromtimestamp(timestamp / 1000)
+            
+            if db_manager.backend == 'mysql':
+                # Use INSERT ... ON DUPLICATE KEY UPDATE for MySQL
+                upsert_sql = f"""
+                INSERT INTO {self.candles_table} 
+                (symbol, timestamp, open, high, low, close, volume, datetime)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                ON DUPLICATE KEY UPDATE
+                    open = VALUES(open),
+                    high = VALUES(high), 
+                    low = VALUES(low),
+                    close = VALUES(close),
+                    volume = VALUES(volume),
+                    datetime = VALUES(datetime)
+                """
+                params = (symbol, timestamp, open_price, high_price, low_price, close_price, volume, dt)
+            else:
+                # Use INSERT OR REPLACE for SQLite
+                upsert_sql = f"""
+                INSERT OR REPLACE INTO {self.candles_table}
+                (symbol, timestamp, open, high, low, close, volume, datetime)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """
+                params = (symbol, timestamp, open_price, high_price, low_price, close_price, volume, dt.isoformat())
+            
+            db_manager.execute(upsert_sql, params)
+            logger.debug(f"[CANDLES] Updated real-time candle for {symbol} at {dt}")
+            
+        except Exception as e:
+            logger.error(f"[CANDLES] Failed to update real-time candle for {symbol}: {e}")
+    
+    async def batch_update_realtime_candles(self, candle_data: List[Dict[str, Any]]):
+        """Batch update multiple candles in real-time (NEW)"""
+        try:
+            if not candle_data:
+                return
+                
+            logger.info(f"[CANDLES] Batch updating {len(candle_data)} real-time candles...")
+            
+            for candle in candle_data:
+                await self.update_realtime_candle(
+                    candle['symbol'],
+                    candle['timestamp'], 
+                    candle['open'],
+                    candle['high'],
+                    candle['low'],
+                    candle['close'],
+                    candle['volume']
+                )
+            
+            logger.success(f"[CANDLES] Batch updated {len(candle_data)} candles")
+            
+        except Exception as e:
+            logger.error(f"[CANDLES] Failed to batch update candles: {e}")
+    
+    async def get_latest_prices(self, symbols: Optional[List[str]] = None) -> Dict[str, Dict[str, float]]:
+        """Get latest prices for symbols for real-time indicator calculations (NEW)"""
+        try:
+            if symbols is None:
+                symbols = SUPPORTED_PAIRS
+                
+            latest_prices = {}
+            
+            for symbol in symbols:
+                if db_manager.backend == 'mysql':
+                    latest_sql = f"""
+                    SELECT open, high, low, close, volume, timestamp
+                    FROM {self.candles_table}
+                    WHERE symbol = %s
+                    ORDER BY timestamp DESC
+                    LIMIT 1
+                    """
+                    params = (symbol,)
+                else:
+                    latest_sql = f"""
+                    SELECT open, high, low, close, volume, timestamp
+                    FROM {self.candles_table}
+                    WHERE symbol = ?
+                    ORDER BY timestamp DESC
+                    LIMIT 1
+                    """
+                    params = (symbol,)
+                
+                result = db_manager.fetchall(latest_sql, params)
+                
+                if result:
+                    row = result[0]
+                    latest_prices[symbol] = {
+                        'open': float(row[0]),
+                        'high': float(row[1]),
+                        'low': float(row[2]),
+                        'close': float(row[3]),
+                        'volume': float(row[4]),
+                        'timestamp': int(row[5])
+                    }
+                else:
+                    logger.warning(f"[CANDLES] No data found for {symbol}")
+                    
+            logger.debug(f"[CANDLES] Retrieved latest prices for {len(latest_prices)} symbols")
+            return latest_prices
+            
+        except Exception as e:
+            logger.error(f"[CANDLES] Failed to get latest prices: {e}")
+            return {}
 
 
 # Global instance

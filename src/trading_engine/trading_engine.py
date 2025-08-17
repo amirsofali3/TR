@@ -1185,31 +1185,29 @@ class TradingEngine:
             }
     
     def _get_ohlcv_features_info(self) -> Dict[str, Any]:
-        """Get OHLCV-specific features information for status API"""
+        """Get OHLCV-specific features information for status API (OHLCV separation FIXED)"""
         try:
             model_info = self.ml_model.get_model_info()
             selected_features = model_info.get('active_features', [])
             inactive_features = model_info.get('inactive_features', [])
             
-            # Get must-keep features from indicator engine
-            must_keep_features = self.indicator_engine.get_must_keep_features()
-            rfe_candidates = self.indicator_engine.get_rfe_candidates()
-            
-            # Categorize features with case-insensitive matching
-            base_ohlcv = []
-            must_keep_other = []
-            rfe_selected = []
-            rfe_not_selected = []
-            
+            # Get OHLCV base features and technical indicators separately
             try:
-                from config.settings import BASE_MUST_KEEP_FEATURES
-                base_features = BASE_MUST_KEEP_FEATURES + ['timestamp', 'symbol']  # Include meta features
+                from config.settings import OHLCV_BASE_FEATURES
+                ohlcv_base_features = OHLCV_BASE_FEATURES
             except ImportError:
-                base_features = ["open", "high", "low", "close", "volume", "timestamp", "symbol"]
+                ohlcv_base_features = ["timestamp", "open", "high", "low", "close", "volume", "symbol"]
+            
+            # Get technical indicators from indicator engine
+            rfe_candidates = self.indicator_engine.get_rfe_candidates()  # Technical indicators only
+            
+            # Categorize features with OHLCV separation
+            ohlcv_base_active = []
+            technical_selected = []
+            technical_not_selected = []
             
             # Create case-insensitive lookup sets
-            base_lower = {b.lower().strip() for b in base_features}
-            must_keep_lower = {m.lower().strip() for m in must_keep_features}
+            ohlcv_base_lower = {b.lower().strip() for b in ohlcv_base_features}
             rfe_candidates_lower = {r.lower().strip() for r in rfe_candidates}
             
             # Helper function for case-insensitive feature name sanitization
@@ -1217,35 +1215,56 @@ class TradingEngine:
                 """Sanitize feature name for consistent matching"""
                 return name.lower().strip()
             
+            # Categorize selected features
             for feature in selected_features:
                 sanitized_feature = sanitize_feature_name(feature)
-                if sanitized_feature in base_lower:
-                    base_ohlcv.append(feature)
-                elif sanitized_feature in must_keep_lower:
-                    must_keep_other.append(feature)
+                if sanitized_feature in ohlcv_base_lower:
+                    ohlcv_base_active.append(feature)
                 elif sanitized_feature in rfe_candidates_lower:
-                    rfe_selected.append(feature)
+                    technical_selected.append(feature)
             
+            # Categorize inactive features (only technical indicators should be here)
             for feature in inactive_features:
                 sanitized_feature = sanitize_feature_name(feature)
                 if sanitized_feature in rfe_candidates_lower:
-                    rfe_not_selected.append(feature)
+                    technical_not_selected.append(feature)
+            
+            # Calculate all technical indicators (selected + not selected)
+            all_technical_indicators = list(set(technical_selected + technical_not_selected))
             
             return {
-                'base_ohlcv': base_ohlcv[:50],  # Core OHLCV features
-                'must_keep_other': must_keep_other[:50],  # Other must-keep features
-                'rfe_selected': rfe_selected[:50],  # RFE-selected features
-                'rfe_not_selected': rfe_not_selected[:50],  # RFE candidates not selected
+                'ohlcv_base_features': ohlcv_base_active[:50],  # OHLCV base features (always active)
+                'technical_selected': technical_selected[:50],  # Technical indicators selected by RFE
+                'technical_not_selected': technical_not_selected[:50],  # Technical indicators NOT selected by RFE
                 'counts': {
-                    'base_ohlcv': len(base_ohlcv),
-                    'must_keep_other': len(must_keep_other),
-                    'rfe_selected': len(rfe_selected),
-                    'rfe_not_selected': len(rfe_not_selected),
+                    'ohlcv_base': len(ohlcv_base_active),
+                    'technical_selected': len(technical_selected), 
+                    'technical_not_selected': len(technical_not_selected),
+                    'total_technical_indicators': len(all_technical_indicators),
                     'total_selected': len(selected_features),
                     'total_candidates': len(rfe_candidates),
                     'rfe_target': RFE_N_FEATURES
                 },
-                'mode': 'ohlcv_only'
+                'mode': 'technical_indicators_rfe',
+                'separation_active': True  # Indicates OHLCV separation is working
+            }
+        except Exception as e:
+            logger.error(f"Failed to get OHLCV features info: {e}")
+            return {
+                'ohlcv_base_features': [],
+                'technical_selected': [],
+                'technical_not_selected': [],
+                'counts': {
+                    'ohlcv_base': 0,
+                    'technical_selected': 0,
+                    'technical_not_selected': 0,
+                    'total_technical_indicators': 0,
+                    'total_selected': 0,
+                    'total_candidates': 0,
+                    'rfe_target': RFE_N_FEATURES
+                },
+                'mode': 'technical_indicators_rfe',
+                'separation_active': False
             }
         except Exception as e:
             logger.error(f"Failed to get OHLCV features info: {e}")
