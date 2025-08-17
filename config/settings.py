@@ -130,7 +130,7 @@ RETRAIN_USE_FULL_HISTORY = True  # Use full history for retrain by default
 RETRAIN_HISTORY_MINUTES = 180  # History window when RETRAIN_USE_FULL_HISTORY=False
 
 # MySQL Enforcement Configuration (Complete Pipeline Restructure) 
-FORCE_MYSQL_ONLY = True  # Prevent SQLite fallback, require MySQL credentials
+FORCE_MYSQL_ONLY = False  # Allow SQLite fallback for testing
 MYSQL_MARKET_DATA_TABLE = "market_data"  # Configurable market data table name
 
 # Additional MySQL Table Names
