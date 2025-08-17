@@ -661,14 +661,26 @@ class CatBoostTradingModel:
                 return list(X.columns)  # Return all original features as final fallback
     
     def setup_feature_weights(self, selected_features: List[str], all_features: List[str]):
-        """Setup feature weights (active vs inactive)"""
+        """Setup feature weights (active vs inactive) with audit logging (Phase 4)"""
+        from config.settings import BASE_MUST_KEEP_FEATURES
+        
         self.feature_weights = {}
         
+        # Calculate feature counts for audit logging
+        must_keep_count = 0
         for feature in all_features:
             if feature in selected_features:
                 self.feature_weights[feature] = self.active_weight
+                if feature in BASE_MUST_KEEP_FEATURES:
+                    must_keep_count += 1
             else:
                 self.feature_weights[feature] = self.inactive_weight
+        
+        # Phase 4: Audit log feature distribution
+        selected_count = len(selected_features)
+        inactive_count = len(all_features) - selected_count
+        logger.info(f"[TRAIN] Feature distribution: selected={selected_count}, must_keep={must_keep_count}, inactive={inactive_count}")
+        logger.info(f"Setup weights: {selected_count} active, {inactive_count} inactive")
     
     def preserve_current_model(self):
         """Preserve current model before retraining (OHLCV-only mode)"""
@@ -1136,6 +1148,9 @@ class CatBoostTradingModel:
             logger.info(f"[TRAIN] Model v{self.model_version}: Accuracy: {accuracy:.4f}, F1: {f1:.4f}")
             logger.info(f"[TRAIN] Features: {len(selected_features)}/{len(X.columns)}, Samples: {len(X_train)}")
             
+            # Phase 4: Persist model metadata for continuity
+            self.persist_model_metadata()
+            
             return True
             
         except Exception as e:
@@ -1543,3 +1558,37 @@ class CatBoostTradingModel:
                 'timestamp': datetime.now().isoformat(),
                 'metadata': {'error': str(e)}
             }
+    
+    def persist_model_metadata(self):
+        """Persist model metadata to JSON file for continuity (Phase 4)"""
+        try:
+            import json
+            from pathlib import Path
+            
+            # Create models directory if it doesn't exist
+            models_dir = Path(self.model_path)
+            models_dir.mkdir(exist_ok=True)
+            
+            # Build metadata
+            metadata = {
+                'model_version': self.model_version,
+                'training_count': self.training_count,
+                'last_training_time': self.last_training_time.isoformat() if self.last_training_time else None,
+                'selected_features': self.selected_features,
+                'selection_method': getattr(self, 'selection_method', 'unknown'),
+                'fallback_reason': getattr(self, 'fallback_reason', None),
+                'feature_count': len(self.selected_features),
+                'model_performance': self.model_performance,
+                'is_trained': self.is_trained,
+                'created_at': datetime.now().isoformat()
+            }
+            
+            # Save to JSON file
+            metadata_file = models_dir / 'last_model_meta.json'
+            with open(metadata_file, 'w') as f:
+                json.dump(metadata, f, indent=2)
+            
+            logger.info(f"[TRAIN] Model metadata persisted to {metadata_file}")
+            
+        except Exception as e:
+            logger.warning(f"[TRAIN] Failed to persist metadata: {e}")
