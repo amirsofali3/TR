@@ -54,7 +54,7 @@ def create_app(data_collector=None, indicator_engine=None, ml_model=None, tradin
     
     @app.route('/api/indicators')
     def get_indicators():
-        """Get indicator status - Phase 3 improved with baseline fallback"""
+        """Get indicator status with improved active/inactive classification (Phase 4)"""
         try:
             if not app.indicator_engine or not app.ml_model:
                 return jsonify({'error': 'Components not initialized'}), 500
@@ -63,29 +63,38 @@ def create_app(data_collector=None, indicator_engine=None, ml_model=None, tradin
             model_info = app.ml_model.get_model_info()
             is_trained = model_info.get('is_trained', False)
             
-            # Phase 3: Improved active feature determination
+            # Phase 4: Use build_final_feature_sets for consistent classification
             if is_trained:
-                # Model is trained, use selected features
-                active_features = model_info.get('active_features', [])
-                inactive_features = model_info.get('inactive_features', [])
+                # Model is trained, use selected features with proper deduplication
+                selected_features = model_info.get('active_features', [])
+                all_feature_names = app.indicator_engine.get_all_feature_names()
+                
+                # Use build_final_feature_sets to avoid duplicates
+                from config.settings import BASE_MUST_KEEP_FEATURES
+                must_keep_features = BASE_MUST_KEEP_FEATURES or ["open", "high", "low", "close", "volume"]
+                
+                feature_sets = app.indicator_engine.build_final_feature_sets(
+                    selected_features, must_keep_features, all_feature_names
+                )
+                
+                active_features = feature_sets['active']
+                inactive_features = feature_sets['inactive']
                 indicator_status = 'trained'
             else:
                 # Model not trained, show baseline features as active
-                from config.settings import BASE_MUST_KEEP_FEATURES, ENABLE_RFE
+                from config.settings import BASE_MUST_KEEP_FEATURES
                 baseline_features = BASE_MUST_KEEP_FEATURES or ["open", "high", "low", "close", "volume"]
                 
                 # Get all available features from indicator engine
                 all_feature_names = app.indicator_engine.get_all_feature_names()
                 
-                # Show must-keep features + base OHLCV as "active" baseline
-                active_features = [f for f in baseline_features if f in all_feature_names]
-                # Add timestamp and symbol_code if they exist
-                for extra_feat in ["timestamp", "symbol_code"]:
-                    if extra_feat in all_feature_names and extra_feat not in active_features:
-                        active_features.append(extra_feat)
+                # Use build_final_feature_sets for consistency
+                feature_sets = app.indicator_engine.build_final_feature_sets(
+                    baseline_features, baseline_features, all_feature_names
+                )
                 
-                # All other computed features are "inactive" until training
-                inactive_features = [f for f in all_feature_names if f not in active_features]
+                active_features = feature_sets['active']
+                inactive_features = feature_sets['inactive']
                 indicator_status = 'baseline'
             
             feature_importance = model_info.get('feature_importance', {})
@@ -320,47 +329,20 @@ def create_app(data_collector=None, indicator_engine=None, ml_model=None, tradin
 
     @app.route('/api/features')
     def get_features():
-        """Get full selected and inactive features lists (User Feedback Adjustments)"""
+        """Get comprehensive feature breakdown with selection metadata (Phase 4)"""
         try:
+            from config.settings import FEATURE_API_ENABLED
+            
+            if not FEATURE_API_ENABLED:
+                return jsonify({'error': 'Feature API disabled'}), 503
+            
             if not app.ml_model:
                 return jsonify({'error': 'ML model not initialized'}), 500
             
-            # Get model info for features
-            model_info = app.ml_model.get_model_info()
-            selected_features = model_info.get('active_features', [])
-            inactive_features = model_info.get('inactive_features', [])
+            # Use new get_feature_breakdown method for comprehensive data
+            feature_breakdown = app.ml_model.get_feature_breakdown()
             
-            # Get additional metadata
-            feature_importance = model_info.get('feature_importance', {})
-            
-            # Build detailed feature information
-            selected_detailed = []
-            for feature in selected_features:
-                selected_detailed.append({
-                    'name': feature,
-                    'importance': feature_importance.get(feature, 0.0),
-                    'status': 'selected'
-                })
-            
-            inactive_detailed = []
-            for feature in inactive_features:
-                inactive_detailed.append({
-                    'name': feature,
-                    'importance': feature_importance.get(feature, 0.0),
-                    'status': 'inactive'
-                })
-            
-            return jsonify({
-                'selected': selected_detailed,
-                'inactive': inactive_detailed,
-                'metadata': {
-                    'total_selected': len(selected_features),
-                    'total_inactive': len(inactive_features),
-                    'total_features': len(selected_features) + len(inactive_features),
-                    'model_version': model_info.get('model_version', 1),
-                    'last_training_time': model_info.get('last_training_time')
-                }
-            })
+            return jsonify(feature_breakdown)
             
         except Exception as e:
             logger.error(f"Features API error: {e}")

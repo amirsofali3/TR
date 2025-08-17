@@ -101,7 +101,7 @@ class CatBoostTradingModel:
                 loss_function='MultiClass',
                 eval_metric='MultiClass',
                 random_seed=42,
-                logging_level='Silent',
+                verbose=False,  # Use verbose instead of logging_level to avoid conflicts
                 bootstrap_type='Bayesian',
                 bagging_temperature=1.0,
                 # subsample removed - incompatible with Bayesian bootstrap
@@ -532,15 +532,15 @@ class CatBoostTradingModel:
             os.makedirs(rfe_train_dir, exist_ok=True)
             
             # Use a simpler model for RFE to speed up the process
+            from config.settings import RFE_VERBOSE
             estimator = CatBoostClassifier(
                 iterations=100,
                 depth=6,
                 learning_rate=0.1,
-                logging_level='Silent',
                 random_seed=42,
                 train_dir=rfe_train_dir,
                 allow_writing_files=True,
-                verbose=False
+                verbose=RFE_VERBOSE  # Use config setting, avoiding logging_level conflict
             )
             
             # Perform RFE with cross-validation (target 25 features)
@@ -580,6 +580,8 @@ class CatBoostTradingModel:
             # Store RFE results and selected features
             self.rfe_selector = rfe
             self.selected_features = final_features
+            self.selection_method = 'RFE'  # Mark successful RFE
+            self.fallback_reason = None  # Clear any previous fallback reason
             
             self.training_progress = 40
             
@@ -588,6 +590,7 @@ class CatBoostTradingModel:
         except Exception as e:
             logger.error(f"[TRAIN] RFE selection failed: {e}")
             # Fallback: select top features by importance
+            self.fallback_reason = f"RFE failed: {str(e)}"  # Record fallback reason
             return await self.select_features_by_importance(X, y, rfe_eligible_features)
     
     async def select_features_by_importance(self, X: pd.DataFrame, y: pd.Series, rfe_eligible_features: List[str]) -> List[str]:
@@ -608,15 +611,15 @@ class CatBoostTradingModel:
             os.makedirs(importance_train_dir, exist_ok=True)
             
             # Train a quick model to get feature importance
+            from config.settings import RFE_VERBOSE
             temp_model = CatBoostClassifier(
                 iterations=100,
                 depth=4,
                 learning_rate=0.1,
-                logging_level='Silent',
                 random_seed=42,
                 train_dir=importance_train_dir,
                 allow_writing_files=True,
-                verbose=False
+                verbose=RFE_VERBOSE  # Use config setting, avoiding logging_level conflict
             )
             
             temp_model.fit(X_sanitized, y)
@@ -636,12 +639,20 @@ class CatBoostTradingModel:
             required_features = [col for col in X_sanitized.columns if col not in rfe_eligible_features]
             all_selected_features = rfe_features + required_features
             
+            # Mark selection method if not already set by RFE
+            if not hasattr(self, 'selection_method') or self.selection_method != 'RFE':
+                self.selection_method = 'importance'
+            
             logger.info(f"[TRAIN] Selected {len(rfe_features)} top important features (max {max_features})")
             
             return all_selected_features
             
         except Exception as e:
             logger.error(f"[TRAIN] Feature importance selection failed: {e}")
+            # Mark as fallback to all features
+            self.selection_method = 'all'
+            if not hasattr(self, 'fallback_reason'):
+                self.fallback_reason = f"Both RFE and importance selection failed: {str(e)}"
             # Try to return sanitized features if available, otherwise original features
             try:
                 X_sanitized, _ = self._sanitize_features(X)
@@ -827,7 +838,7 @@ class CatBoostTradingModel:
                 loss_function='MultiClass',
                 eval_metric='MultiClass',
                 random_seed=42,
-                logging_level='Silent',
+                verbose=False,  # Use verbose instead of logging_level 
                 train_dir=simple_train_dir,
                 allow_writing_files=True
             )
@@ -1021,7 +1032,7 @@ class CatBoostTradingModel:
                 loss_function='MultiClass',
                 eval_metric='MultiClass',
                 random_seed=42,
-                logging_level='Silent',
+                verbose=False,  # Use verbose instead of logging_level
                 bootstrap_type='Bayesian',
                 bagging_temperature=1.0,
                 colsample_bylevel=0.8,
@@ -1459,5 +1470,76 @@ class CatBoostTradingModel:
             # User Feedback Adjustments
             'class_mapping': class_mapping,
             'accuracy_live_count': accuracy_stats.get('live_count', 0),
-            'collected_valid_samples': self.model_performance.get('training_samples', 0)  # Valid samples after sanitization
+            'collected_valid_samples': self.model_performance.get('training_samples', 0),  # Valid samples after sanitization
+            # Phase 4 additions: Feature selection metadata
+            'feature_selection': {
+                'method': getattr(self, 'selection_method', 'unknown'),
+                'selected_count': len(self.selected_features),
+                'must_keep_count': len([f for f, w in self.feature_weights.items() if w == self.active_weight and f in BASE_MUST_KEEP_FEATURES]),
+                'inactive_count': len([f for f, w in self.feature_weights.items() if w == self.inactive_weight]),
+                'rfe_enabled': ENABLE_RFE,
+                'fallback_reason': getattr(self, 'fallback_reason', None)
+            }
         }
+    
+    def get_feature_breakdown(self) -> Dict[str, Any]:
+        """Get comprehensive feature breakdown for API endpoints (Phase 4)"""
+        try:
+            from config.settings import BASE_MUST_KEEP_FEATURES
+            
+            # Get active and inactive features from feature weights
+            active_features = [f for f, w in self.feature_weights.items() if w == self.active_weight]
+            inactive_features = [f for f, w in self.feature_weights.items() if w == self.inactive_weight]
+            
+            # Calculate must-keep features 
+            must_keep_features = [f for f in active_features if f in BASE_MUST_KEEP_FEATURES]
+            
+            # Get feature importance data
+            feature_importance = self.feature_importance or {}
+            
+            # Build detailed breakdown
+            selected_detailed = []
+            for feature in active_features:
+                selected_detailed.append({
+                    'name': feature,
+                    'importance': feature_importance.get(feature, 0.0),
+                    'is_must_keep': feature in BASE_MUST_KEEP_FEATURES,
+                    'status': 'selected'
+                })
+            
+            inactive_detailed = []
+            for feature in inactive_features:
+                inactive_detailed.append({
+                    'name': feature,
+                    'importance': feature_importance.get(feature, 0.0),
+                    'status': 'inactive'
+                })
+            
+            return {
+                'selected': selected_detailed,
+                'inactive': inactive_detailed,
+                'must_keep': must_keep_features,
+                'selection_method': getattr(self, 'selection_method', 'unknown'),
+                'timestamp': datetime.now().isoformat(),
+                'metadata': {
+                    'total_selected': len(active_features),
+                    'total_inactive': len(inactive_features),
+                    'total_features': len(active_features) + len(inactive_features),
+                    'must_keep_count': len(must_keep_features),
+                    'model_version': self.model_version,
+                    'last_training_time': self.last_training_time.isoformat() if self.last_training_time else None,
+                    'rfe_enabled': ENABLE_RFE,
+                    'fallback_reason': getattr(self, 'fallback_reason', None)
+                }
+            }
+            
+        except Exception as e:
+            logger.error(f"Error getting feature breakdown: {e}")
+            return {
+                'selected': [],
+                'inactive': [],
+                'must_keep': [],
+                'selection_method': 'error',
+                'timestamp': datetime.now().isoformat(),
+                'metadata': {'error': str(e)}
+            }

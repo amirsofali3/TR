@@ -844,3 +844,67 @@ class IndicatorEngine:
         
         logger.debug(f"[INDICATORS] All feature names: {len(all_features)} features")
         return all_features
+    
+    def build_final_feature_sets(self, selected_features: List[str], must_keep: List[str], all_features: List[str]) -> Dict[str, List[str]]:
+        """Build final active/inactive feature sets with proper deduplication (Phase 4)"""
+        try:
+            from config.settings import BASE_MUST_KEEP_FEATURES
+            
+            # Normalize feature names for case-insensitive comparison
+            def normalize_name(name: str) -> str:
+                """Normalize feature name for consistent comparison"""
+                return str(name).lower().strip().replace(' ', '_')
+            
+            # Create normalized lookup sets
+            selected_normalized = {normalize_name(f): f for f in selected_features}
+            must_keep_normalized = {normalize_name(f): f for f in must_keep}
+            all_normalized = {normalize_name(f): f for f in all_features}
+            
+            # Build active features (selected + must_keep, deduplicated)
+            active_features = []
+            seen_normalized = set()
+            
+            # Add selected features first
+            for feature in selected_features:
+                norm_name = normalize_name(feature)
+                if norm_name not in seen_normalized and norm_name in all_normalized:
+                    active_features.append(feature)
+                    seen_normalized.add(norm_name)
+            
+            # Add must_keep features if not already included
+            for feature in must_keep:
+                norm_name = normalize_name(feature)
+                if norm_name not in seen_normalized and norm_name in all_normalized:
+                    active_features.append(feature)
+                    seen_normalized.add(norm_name)
+            
+            # Build inactive features (all_features - active, deduplicated)
+            inactive_features = []
+            for feature in all_features:
+                norm_name = normalize_name(feature)
+                if norm_name not in seen_normalized:
+                    inactive_features.append(feature)
+            
+            # Log the results for debugging
+            logger.info(f"[INDICATORS] Final feature sets: {len(active_features)} active, {len(inactive_features)} inactive")
+            logger.debug(f"[INDICATORS] Active features: {active_features[:10]}{'...' if len(active_features) > 10 else ''}")
+            logger.debug(f"[INDICATORS] Inactive features: {inactive_features[:10]}{'...' if len(inactive_features) > 10 else ''}")
+            
+            return {
+                'active': active_features,
+                'inactive': inactive_features,
+                'total_count': len(active_features) + len(inactive_features),
+                'active_count': len(active_features),
+                'inactive_count': len(inactive_features)
+            }
+            
+        except Exception as e:
+            logger.error(f"[INDICATORS] Error building final feature sets: {e}")
+            # Return safe fallback
+            return {
+                'active': selected_features or must_keep or [],
+                'inactive': [],
+                'total_count': len(selected_features) if selected_features else len(must_keep) if must_keep else 0,
+                'active_count': len(selected_features) if selected_features else len(must_keep) if must_keep else 0,
+                'inactive_count': 0
+            }

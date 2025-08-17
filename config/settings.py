@@ -105,6 +105,13 @@ ENABLE_RFE = True  # Enable/disable Recursive Feature Elimination
 MIN_ANALYSIS_CANDLES = 150  # Minimum candles for live analysis (fetch fallback)
 RFE_FALLBACK_TOP_N = 50  # Top N features when RFE disabled or fails
 
+# Phase 4 Feature Selection & Signal Generation Settings
+FEATURE_API_ENABLED = True  # Enable /api/features endpoint
+SIGNAL_MIN_FEATURE_COVERAGE = 0.9  # Minimum feature coverage for signal generation
+HISTORICAL_FETCH_LIMIT = 500  # Max candles to fetch for fallback analysis
+MAX_INACTIVE_FEATURE_LIST = 50  # UI truncation limit for inactive features
+RFE_VERBOSE = False  # CatBoost verbosity for RFE (replaces logging_level)
+
 # Retrain Configuration (User Feedback Adjustments)
 RETRAIN_USE_FULL_HISTORY = True  # Use full history for retrain by default
 RETRAIN_HISTORY_MINUTES = 180  # History window when RETRAIN_USE_FULL_HISTORY=False
