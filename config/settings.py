@@ -100,6 +100,11 @@ BASE_ANALYSIS_INTERVAL_SEC = 5  # Default analysis interval (user-adjustable)
 # Training Sample Requirements (User Feedback Adjustments)
 MIN_VALID_SAMPLES = 150  # Minimum valid samples after sanitization
 
+# Phase 3 Stabilization Settings
+ENABLE_RFE = True  # Enable/disable Recursive Feature Elimination
+MIN_ANALYSIS_CANDLES = 150  # Minimum candles for live analysis (fetch fallback)
+RFE_FALLBACK_TOP_N = 50  # Top N features when RFE disabled or fails
+
 # Retrain Configuration (User Feedback Adjustments)
 RETRAIN_USE_FULL_HISTORY = True  # Use full history for retrain by default
 RETRAIN_HISTORY_MINUTES = 180  # History window when RETRAIN_USE_FULL_HISTORY=False

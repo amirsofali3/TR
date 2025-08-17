@@ -54,15 +54,40 @@ def create_app(data_collector=None, indicator_engine=None, ml_model=None, tradin
     
     @app.route('/api/indicators')
     def get_indicators():
-        """Get indicator status"""
+        """Get indicator status - Phase 3 improved with baseline fallback"""
         try:
             if not app.indicator_engine or not app.ml_model:
                 return jsonify({'error': 'Components not initialized'}), 500
             
             # Get model info to determine active/inactive indicators
             model_info = app.ml_model.get_model_info()
-            active_features = model_info.get('active_features', [])
-            inactive_features = model_info.get('inactive_features', [])
+            is_trained = model_info.get('is_trained', False)
+            
+            # Phase 3: Improved active feature determination
+            if is_trained:
+                # Model is trained, use selected features
+                active_features = model_info.get('active_features', [])
+                inactive_features = model_info.get('inactive_features', [])
+                indicator_status = 'trained'
+            else:
+                # Model not trained, show baseline features as active
+                from config.settings import BASE_MUST_KEEP_FEATURES, ENABLE_RFE
+                baseline_features = BASE_MUST_KEEP_FEATURES or ["open", "high", "low", "close", "volume"]
+                
+                # Get all available features from indicator engine
+                all_feature_names = app.indicator_engine.get_all_feature_names()
+                
+                # Show must-keep features + base OHLCV as "active" baseline
+                active_features = [f for f in baseline_features if f in all_feature_names]
+                # Add timestamp and symbol_code if they exist
+                for extra_feat in ["timestamp", "symbol_code"]:
+                    if extra_feat in all_feature_names and extra_feat not in active_features:
+                        active_features.append(extra_feat)
+                
+                # All other computed features are "inactive" until training
+                inactive_features = [f for f in all_feature_names if f not in active_features]
+                indicator_status = 'baseline'
+            
             feature_importance = model_info.get('feature_importance', {})
             
             # Get all indicators from config
@@ -81,11 +106,36 @@ def create_app(data_collector=None, indicator_engine=None, ml_model=None, tradin
                     'parameters': config['parameters']
                 })
             
+            # Add base OHLCV features that might not be in config
+            from config.settings import BASE_MUST_KEEP_FEATURES
+            base_features = BASE_MUST_KEEP_FEATURES or ["open", "high", "low", "close", "volume"]
+            for base_feat in base_features:
+                # Check if already in indicators list
+                if not any(ind['name'] == base_feat for ind in all_indicators):
+                    all_indicators.append({
+                        'name': base_feat,
+                        'category': 'ohlcv',
+                        'status': 'active' if base_feat in active_features else 'inactive',
+                        'rfe_eligible': False,
+                        'must_keep': True,
+                        'importance': feature_importance.get(base_feat, 0.0),
+                        'parameters': {}
+                    })
+            
+            # Get skipped indicators for transparency
+            skipped_indicators = app.indicator_engine.get_skipped_indicators()
+            
             return jsonify({
                 'indicators': all_indicators,
                 'total_count': len(all_indicators),
                 'active_count': len(active_features),
-                'inactive_count': len(inactive_features)
+                'inactive_count': len(inactive_features),
+                'indicator_status': indicator_status,  # 'trained', 'baseline', or 'error'
+                'is_model_trained': is_trained,
+                'rfe_enabled': getattr(app.config, 'ENABLE_RFE', True),  # Phase 3 addition
+                'skipped_count': len(skipped_indicators),
+                'skipped_indicators': skipped_indicators[:5],  # Show first 5 for transparency
+                'baseline_active_count': len(active_features) if not is_trained else 0
             })
             
         except Exception as e:

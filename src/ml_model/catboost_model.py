@@ -125,51 +125,66 @@ class CatBoostTradingModel:
             raise
     
     def _sanitize_features(self, feature_df: pd.DataFrame) -> tuple:
-        """Sanitize features and return both sanitized data and metadata
+        """Sanitize features NON-DESTRUCTIVELY (no row drops) and return both sanitized data and metadata
+        
+        Phase 3 Fix: NEVER drop rows, only columns. Use imputation for missing values.
         
         Returns:
             tuple: (sanitized_dataframe, metadata_dict)
         """
         try:
-            logger.info("[TRAIN] Starting feature sanitization...")
+            logger.info("[TRAIN] Starting NON-DESTRUCTIVE feature sanitization...")
             sanitized_df = feature_df.copy()
             initial_feature_count = len(sanitized_df.columns)
+            initial_row_count = len(sanitized_df)
             dropped_features = []
             converted_features = []
+            imputed_columns = []
             
             for column in feature_df.columns:
                 col_data = sanitized_df[column]
                 
                 # Check if column is already numeric
                 if pd.api.types.is_numeric_dtype(col_data):
+                    # Check for NaN values that need imputation
+                    if col_data.isna().any():
+                        nan_count = col_data.isna().sum()
+                        sanitized_df[column] = self._impute_missing(col_data)
+                        imputed_columns.append(f"{column} ({nan_count} NaNs)")
                     continue
                 
-                # Handle object/string columns
+                # Handle object/string columns  
                 if col_data.dtype == 'object':
                     unique_values = col_data.dropna().unique()
                     unique_count = len(unique_values)
                     
                     logger.info(f"[TRAIN] Found non-numeric column '{column}' with {unique_count} unique values")
                     
-                    # Special handling for symbol column - encode or drop
+                    # Special handling for symbol column - encode without dropping rows
                     if column.lower() == 'symbol':
                         logger.info(f"[TRAIN] Processing symbol column: {column}")
                         if unique_count <= 1:
-                            # Constant symbol - drop it as it provides no information
+                            # Constant symbol - drop column but keep rows
                             logger.info(f"[TRAIN] Dropping constant symbol column: {column} (value: {unique_values[0] if len(unique_values) > 0 else 'N/A'})")
                             sanitized_df = sanitized_df.drop(columns=[column])
                             dropped_features.append(f"{column} (constant_symbol)")
                         elif unique_count <= 50:  # Reasonable number of symbols for encoding
-                            # Encode symbol to numerical codes
+                            # Encode symbol to numerical codes, handling NaNs
                             from sklearn.preprocessing import LabelEncoder
                             le = LabelEncoder()
-                            symbol_codes = le.fit_transform(col_data.astype(str))
-                            sanitized_df[f'{column}_code'] = symbol_codes
+                            # Fill NaNs with a placeholder for encoding, then restore as numeric NaN
+                            col_filled = col_data.fillna('__MISSING__').astype(str)
+                            symbol_codes = le.fit_transform(col_filled)
+                            # Convert back to float and set missing values as NaN for imputation
+                            symbol_codes = symbol_codes.astype(float)
+                            symbol_codes[col_filled == '__MISSING__'] = np.nan
+                            # Apply imputation to handle any NaNs
+                            sanitized_df[f'{column}_code'] = self._impute_missing(pd.Series(symbol_codes, index=col_data.index))
                             sanitized_df = sanitized_df.drop(columns=[column])
                             converted_features.append(f"{column} → {column}_code (symbol_encoded)")
                             logger.info(f"[TRAIN] Encoded symbol column {column} to {column}_code with {unique_count} categories")
                         else:
-                            # Too many symbols - drop it
+                            # Too many symbols - drop column but keep rows
                             logger.info(f"[TRAIN] Dropping high-cardinality symbol column: {column} ({unique_count} symbols)")
                             sanitized_df = sanitized_df.drop(columns=[column])
                             dropped_features.append(f"{column} (high_cardinality_symbol)")
@@ -188,14 +203,22 @@ class CatBoostTradingModel:
                             # Attempt to convert to numeric first
                             numeric_col = pd.to_numeric(col_data, errors='coerce')
                             if not numeric_col.isna().all():
-                                sanitized_df[column] = numeric_col
+                                # Apply imputation to handle conversion NaNs
+                                sanitized_df[column] = self._impute_missing(numeric_col)
                                 converted_features.append(f"{column} (to_numeric)")
+                                if numeric_col.isna().any():
+                                    imputed_columns.append(f"{column} ({numeric_col.isna().sum()} conversion NaNs)")
                                 continue
                             
                             # If conversion fails, use label encoding for low-cardinality categorical
                             from sklearn.preprocessing import LabelEncoder
                             le = LabelEncoder()
-                            sanitized_df[column] = le.fit_transform(col_data.astype(str))
+                            col_filled = col_data.fillna('__MISSING__').astype(str)
+                            encoded_values = le.fit_transform(col_filled)
+                            # Convert to float and handle missing placeholder
+                            encoded_values = encoded_values.astype(float)
+                            encoded_values[col_filled == '__MISSING__'] = np.nan
+                            sanitized_df[column] = self._impute_missing(pd.Series(encoded_values, index=col_data.index))
                             converted_features.append(f"{column} (label_encoded)")
                             
                         except Exception as e:
@@ -213,31 +236,40 @@ class CatBoostTradingModel:
                 else:
                     try:
                         # Try to convert to numeric
-                        sanitized_df[column] = pd.to_numeric(col_data, errors='coerce')
+                        numeric_col = pd.to_numeric(col_data, errors='coerce')
+                        sanitized_df[column] = self._impute_missing(numeric_col)
                         converted_features.append(f"{column} (forced_numeric)")
+                        if numeric_col.isna().any():
+                            imputed_columns.append(f"{column} ({numeric_col.isna().sum()} conversion NaNs)")
                     except:
                         logger.warning(f"[TRAIN] Dropping unconvertible column: {column} (dtype: {col_data.dtype})")
                         sanitized_df = sanitized_df.drop(columns=[column])
                         dropped_features.append(column)
             
-            # Final check: remove any columns that became all NaN after conversion
+            # Final check: remove any columns that became all NaN after conversion (but keep rows)
+            all_nan_columns = []
             for column in sanitized_df.columns:
                 if sanitized_df[column].isna().all():
                     logger.info(f"[TRAIN] Dropping all-NaN column after conversion: {column}")
                     sanitized_df = sanitized_df.drop(columns=[column])
-                    dropped_features.append(column)
+                    all_nan_columns.append(column)
+                    dropped_features.append(f"{column} (all_NaN)")
             
-            # Remove any remaining rows with NaN values
-            rows_before = len(sanitized_df)
-            sanitized_df = sanitized_df.dropna()
-            rows_after = len(sanitized_df)
+            # CRITICAL: Ensure no rows are dropped - only columns
+            final_row_count = len(sanitized_df)
             
             # Log sanitization results
             final_feature_count = len(sanitized_df.columns)
-            logger.info(f"[TRAIN] Feature sanitization completed:")
+            logger.info(f"[TRAIN] NON-DESTRUCTIVE feature sanitization completed:")
             logger.info(f"[TRAIN]   Features: {initial_feature_count} → {final_feature_count}")
-            logger.info(f"[TRAIN]   Samples: {rows_before} → {rows_after}")
+            logger.info(f"[TRAIN]   Samples: {initial_row_count} → {final_row_count} (MUST BE EQUAL)")
             
+            # Assert row count preservation (critical for X/y alignment)
+            if final_row_count != initial_row_count:
+                logger.error(f"[TRAIN] CRITICAL ERROR: Row count changed during sanitization! {initial_row_count} → {final_row_count}")
+                logger.error("[TRAIN] This will cause X/y length mismatch!")
+                # This should not happen with the new implementation
+                
             if dropped_features:
                 logger.info(f"[TRAIN]   Dropped features ({len(dropped_features)}): {', '.join(dropped_features[:5])}" + 
                           (f" and {len(dropped_features)-5} more" if len(dropped_features) > 5 else ""))
@@ -245,6 +277,10 @@ class CatBoostTradingModel:
             if converted_features:
                 logger.info(f"[TRAIN]   Converted features ({len(converted_features)}): {', '.join(converted_features[:3])}" + 
                           (f" and {len(converted_features)-3} more" if len(converted_features) > 3 else ""))
+                          
+            if imputed_columns:
+                logger.info(f"[TRAIN]   Imputed features ({len(imputed_columns)}): {', '.join(imputed_columns[:3])}" + 
+                          (f" and {len(imputed_columns)-3} more" if len(imputed_columns) > 3 else ""))
             
             # Create metadata dict
             metadata = {
@@ -254,8 +290,10 @@ class CatBoostTradingModel:
                 'dropped_high_cardinality': len([f for f in dropped_features if 'high-cardinality' in str(f) or 'high_cardinality' in str(f)]),
                 'encoded_categorical': len([f for f in converted_features if 'label_encoded' in f or 'symbol_encoded' in f]),
                 'converted_numeric': len([f for f in converted_features if 'to_numeric' in f or 'forced_numeric' in f]),
-                'samples_before': rows_before,
-                'samples_after': rows_after
+                'imputed_columns': len(imputed_columns),
+                'samples_before': initial_row_count,
+                'samples_after': final_row_count,
+                'rows_preserved': final_row_count == initial_row_count
             }
             
             # Store sanitization stats for reporting
@@ -269,8 +307,43 @@ class CatBoostTradingModel:
             return feature_df, {
                 'initial_feature_count': len(feature_df.columns),
                 'final_feature_count': len(feature_df.columns), 
+                'samples_before': len(feature_df),
+                'samples_after': len(feature_df),
                 'error': str(e)
             }
+
+    def _impute_missing(self, series: pd.Series) -> pd.Series:
+        """Impute missing values using forward fill → back fill → zero strategy
+        
+        Phase 3 addition: Handle NaN values without dropping rows
+        """
+        try:
+            if not series.isna().any():
+                return series
+                
+            # Strategy: forward fill → back fill → zero
+            imputed = series.copy()
+            
+            # Forward fill
+            imputed = imputed.fillna(method='ffill')
+            
+            # Back fill for any remaining NaNs
+            imputed = imputed.fillna(method='bfill')
+            
+            # Fill any remaining NaNs with zero (or median for float columns)
+            if imputed.isna().any():
+                if pd.api.types.is_numeric_dtype(imputed):
+                    # Use median for numeric columns, fallback to 0
+                    fill_value = imputed.median() if not imputed.isna().all() else 0
+                else:
+                    fill_value = 0
+                imputed = imputed.fillna(fill_value)
+            
+            return imputed
+            
+        except Exception as e:
+            logger.warning(f"[TRAIN] Imputation failed for series: {e}, filling with zeros")
+            return series.fillna(0)
     
     async def prepare_features_and_labels(self, data: Dict[str, Any], symbol: str) -> Tuple[pd.DataFrame, pd.Series]:
         """Prepare features and labels from indicator data (MySQL migration improved)"""
@@ -641,6 +714,151 @@ class CatBoostTradingModel:
         
         logger.info(f"Setup weights: {len(selected_features)} active, {len(all_features) - len(selected_features)} inactive")
     
+    async def perform_full_training_flow(self, X: pd.DataFrame, y: pd.Series, rfe_eligible_features: List[str], X_recent: Optional[pd.DataFrame] = None, y_recent: Optional[pd.Series] = None) -> bool:
+        """Comprehensive training flow with multiple fallback strategies - Phase 3 addition"""
+        try:
+            logger.info("[TRAIN] Starting comprehensive training flow with fallback strategies...")
+            
+            # Attempt 1: Full training with RFE (if enabled)
+            try:
+                success = await self.train_model(X, y, rfe_eligible_features, X_recent, y_recent)
+                if success:
+                    logger.success("[TRAIN] Full training flow completed successfully")
+                    return True
+                else:
+                    logger.warning("[TRAIN] Full training flow failed, trying fallback strategies...")
+            except Exception as e:
+                logger.error(f"[TRAIN] Full training failed: {e}")
+                self.last_training_error = f"Full training: {str(e)}"
+            
+            # Attempt 2: Simplified training with all numeric features (no RFE)
+            try:
+                logger.info("[TRAIN] Attempting simplified training with all numeric features...")
+                
+                # Ensure we have numeric data
+                X_simplified, _ = self._sanitize_features(X)
+                if len(X_simplified.columns) == 0:
+                    logger.error("[TRAIN] No numeric features available for simplified training")
+                    return False
+                
+                # Use all numeric features as "selected"
+                all_numeric_features = list(X_simplified.columns)
+                self.selected_features = all_numeric_features
+                self.selected_feature_count = len(all_numeric_features)
+                
+                logger.info(f"[TRAIN] Simplified training with {len(all_numeric_features)} features")
+                
+                # Try basic model training without complex RFE
+                success = await self._train_simplified_model(X_simplified, y)
+                if success:
+                    logger.success("[TRAIN] Simplified training completed successfully")
+                    return True
+                    
+            except Exception as e:
+                logger.error(f"[TRAIN] Simplified training failed: {e}")
+                self.last_training_error = f"Simplified training: {str(e)}"
+            
+            # Attempt 3: Minimal model with just must-keep features
+            try:
+                logger.info("[TRAIN] Attempting minimal training with must-keep features only...")
+                
+                from config.settings import BASE_MUST_KEEP_FEATURES
+                must_keep_features = BASE_MUST_KEEP_FEATURES or ["open", "high", "low", "close", "volume"]
+                
+                # Filter to existing columns
+                available_must_keep = [col for col in must_keep_features if col in X.columns]
+                
+                if len(available_must_keep) < 3:
+                    logger.error("[TRAIN] Not enough must-keep features for minimal training")
+                    return False
+                
+                X_minimal = X[available_must_keep]
+                self.selected_features = available_must_keep
+                self.selected_feature_count = len(available_must_keep)
+                
+                logger.info(f"[TRAIN] Minimal training with {len(available_must_keep)} must-keep features")
+                
+                success = await self._train_simplified_model(X_minimal, y)
+                if success:
+                    logger.success("[TRAIN] Minimal training completed successfully")
+                    return True
+                    
+            except Exception as e:
+                logger.error(f"[TRAIN] Minimal training failed: {e}")
+                self.last_training_error = f"Minimal training: {str(e)}"
+            
+            # All attempts failed
+            logger.error("[TRAIN] All training strategies failed")
+            self.last_training_error = "All training strategies failed"
+            return False
+            
+        except Exception as e:
+            logger.error(f"[TRAIN] Comprehensive training flow failed: {e}")
+            self.last_training_error = f"Training flow error: {str(e)}"
+            return False
+    
+    async def _train_simplified_model(self, X: pd.DataFrame, y: pd.Series) -> bool:
+        """Train a simplified model without complex features - Phase 3 helper"""
+        try:
+            # Basic data validation
+            if len(X) == 0 or len(y) == 0 or len(X) != len(y):
+                logger.error(f"[TRAIN] Invalid data for simplified training: X={len(X)}, y={len(y)}")
+                return False
+            
+            # Encode labels
+            if self.label_encoder is None:
+                self.label_encoder = LabelEncoder()
+            
+            y_encoded = self.label_encoder.fit_transform(y)
+            
+            # Simple train/test split
+            X_train, X_test, y_train, y_test = train_test_split(
+                X, y_encoded, test_size=0.2, random_state=42, stratify=y_encoded
+            )
+            
+            # Create simple CatBoost model
+            simple_train_dir = os.path.join(self.model_path, "catboost_simple")
+            os.makedirs(simple_train_dir, exist_ok=True)
+            
+            self.model = CatBoostClassifier(
+                iterations=min(500, CATBOOST_ITERATIONS // 2),  # Fewer iterations for simplified model
+                depth=min(6, CATBOOST_DEPTH),
+                learning_rate=CATBOOST_LEARNING_RATE,
+                loss_function='MultiClass',
+                eval_metric='MultiClass',
+                random_seed=42,
+                logging_level='Silent',
+                train_dir=simple_train_dir,
+                allow_writing_files=True
+            )
+            
+            # Train the model
+            self.model.fit(X_train, y_train, verbose=False)
+            
+            # Evaluate
+            y_pred = self.model.predict(X_test)
+            accuracy = accuracy_score(y_test, y_pred)
+            
+            # Store basic performance
+            self.model_performance = {
+                'accuracy': accuracy,
+                'training_samples': len(X_train),
+                'test_samples': len(X_test),
+                'selected_features': len(X.columns),
+                'training_date': datetime.now().isoformat(),
+                'model_type': 'simplified'
+            }
+            
+            self.is_trained = True
+            self.last_training_time = datetime.now()
+            logger.info(f"[TRAIN] Simplified model trained with accuracy: {accuracy:.4f}")
+            
+            return True
+            
+        except Exception as e:
+            logger.error(f"[TRAIN] Simplified model training failed: {e}")
+            return False
+    
     async def train_model(self, X: pd.DataFrame, y: pd.Series, rfe_eligible_features: List[str], X_recent: Optional[pd.DataFrame] = None, y_recent: Optional[pd.Series] = None):
         """Train the CatBoost model with staged progress and model preservation (OHLCV-only mode)"""
         try:
@@ -671,12 +889,35 @@ class CatBoostTradingModel:
             X_sanitized, main_sanitization_stats = self._sanitize_features(X)
             logger.info(f"[TRAIN] Main sanitization: {main_sanitization_stats['initial_feature_count']} → {main_sanitization_stats['final_feature_count']} features")
             
+            # CRITICAL: Verify row alignment after sanitization 
+            if len(X_sanitized) != len(y):
+                logger.error(f"[TRAIN] CRITICAL X/y length mismatch after sanitization! X: {len(X_sanitized)}, y: {len(y)}")
+                if len(X_sanitized) < len(y):
+                    # If X is shorter, align y to X's index
+                    logger.warning(f"[TRAIN] Realigning y to X's index to fix mismatch")
+                    y = y.loc[X_sanitized.index]
+                    logger.info(f"[TRAIN] Realigned y length: {len(y)}")
+                else:
+                    # This should not happen with the new sanitization, but handle it
+                    logger.error(f"[TRAIN] X is longer than y - this should not happen!")
+                    return False
+            else:
+                logger.info(f"[TRAIN] X/y alignment verified: {len(X_sanitized)} samples")
+            
             # Sanitize recent features if provided
             X_recent_sanitized = None
             if X_recent is not None:
                 logger.info("[TRAIN] Sanitizing recent training features...")
                 X_recent_sanitized, recent_sanitization_stats = self._sanitize_features(X_recent)
                 logger.info(f"[TRAIN] Recent sanitization: {recent_sanitization_stats['initial_feature_count']} → {recent_sanitization_stats['final_feature_count']} features")
+                
+                # Verify recent features alignment if y_recent provided
+                if y_recent is not None and len(X_recent_sanitized) != len(y_recent):
+                    logger.warning(f"[TRAIN] Recent X/y length mismatch: X: {len(X_recent_sanitized)}, y: {len(y_recent)}")
+                    if len(X_recent_sanitized) < len(y_recent):
+                        y_recent = y_recent.loc[X_recent_sanitized.index]
+                        logger.info(f"[TRAIN] Realigned recent y length: {len(y_recent)}")
+            
             
             # Encode labels and calculate class distribution
             y_encoded = self.label_encoder.fit_transform(y)
@@ -713,8 +954,32 @@ class CatBoostTradingModel:
             self.current_training_stage = 'feature_selection'
             logger.info("[TRAIN] Stage 3/6: Feature selection...")
             
-            # Perform RFE feature selection with progress tracking (using sanitized data)
-            selected_features = await self.perform_rfe_selection(X_train, y_train, rfe_eligible_features, X_recent_sanitized, y_recent)
+            # Check ENABLE_RFE setting for optional RFE (Phase 3 improvement)
+            from config.settings import ENABLE_RFE, RFE_FALLBACK_TOP_N, BASE_MUST_KEEP_FEATURES
+            
+            if ENABLE_RFE:
+                logger.info("[TRAIN] RFE is enabled, performing feature selection...")
+                # Perform RFE feature selection with progress tracking (using sanitized data)
+                selected_features = await self.perform_rfe_selection(X_train, y_train, rfe_eligible_features, X_recent_sanitized, y_recent)
+            else:
+                logger.info("[TRAIN] RFE is disabled, using importance-based fallback selection...")
+                # Use importance-based selection instead of RFE
+                selected_features = await self.select_features_by_importance(X_train, y_train, rfe_eligible_features)
+            
+            # Ensure selected_features is never empty (critical fallback)
+            if not selected_features:
+                logger.warning("[TRAIN] No features selected! Using must-keep features as fallback")
+                must_keep_features = BASE_MUST_KEEP_FEATURES or ["open", "high", "low", "close", "volume"]
+                # Take must-keep features that exist in the data
+                selected_features = [col for col in must_keep_features if col in X_train.columns]
+                
+                # If still empty, take all numeric features (last resort)
+                if not selected_features:
+                    logger.warning("[TRAIN] Must-keep features not found! Using all available features")
+                    selected_features = list(X_train.columns)
+                
+                logger.info(f"[TRAIN] Fallback selected {len(selected_features)} features: {selected_features[:5]}...")
+                
             self.selected_features = selected_features
             self.selected_feature_count = len(selected_features)
             
@@ -744,6 +1009,10 @@ class CatBoostTradingModel:
             
             logger.info(f"[TRAIN] CatBoost class weights: {catboost_class_weights}")
             
+            # Create stable train directory for CatBoost artifacts (Phase 3 improvement)
+            main_train_dir = os.path.join(self.model_path, "catboost_main")
+            os.makedirs(main_train_dir, exist_ok=True)
+            
             # Create a new model instance with class weights in constructor
             self.model = CatBoostClassifier(
                 iterations=CATBOOST_ITERATIONS,
@@ -760,6 +1029,8 @@ class CatBoostTradingModel:
                 thread_count=-1,
                 use_best_model=True,
                 early_stopping_rounds=50,
+                train_dir=main_train_dir,  # Stable train directory
+                allow_writing_files=True,
                 class_weights=catboost_class_weights  # Set in constructor
             )
             
