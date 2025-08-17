@@ -302,32 +302,78 @@ class TradingEngine:
         except Exception as e:
             logger.error(f"Market analysis failed: {e}")
     
-    async def analyze_symbol(self, symbol: str) -> Optional[Dict[str, Any]]:
-        """Analyze a single symbol and generate prediction (MySQL migration improved + Phase 3 data fallback)"""
+    async def fetch_historical_candles(self, symbol: str, limit: int = None) -> Optional[pd.DataFrame]:
+        """Fetch historical candles directly from database bypassing live buffer (Phase 4)"""
         try:
-            # Phase 3: Get historical data with fallback logic
-            from config.settings import MIN_ANALYSIS_CANDLES
+            from config.settings import HISTORICAL_FETCH_LIMIT
+            fetch_limit = limit or HISTORICAL_FETCH_LIMIT
+            
+            logger.debug(f"[FETCH] Fetching {fetch_limit} historical candles for {symbol}")
+            
+            # Try to use candle data manager if available
+            if hasattr(self, 'candle_data_manager') and self.candle_data_manager:
+                df = await self.candle_data_manager.load_candle_data(
+                    symbols=[symbol], 
+                    limit=fetch_limit,
+                    recent_only=True,
+                    recent_count=fetch_limit
+                )
+            else:
+                # Fallback to data collector 
+                df = await self.data_collector.get_historical_data(
+                    symbol, DEFAULT_TIMEFRAME, fetch_limit
+                )
+            
+            if df is None or len(df) == 0:
+                logger.warning(f"[FETCH] No historical data found for {symbol}")
+                return None
+            
+            # Filter by symbol if multiple symbols returned
+            if 'symbol' in df.columns:
+                df = df[df['symbol'] == symbol]
+            
+            # Ensure minimum required columns
+            required_cols = ['open', 'high', 'low', 'close', 'volume']
+            missing_cols = [col for col in required_cols if col not in df.columns]
+            if missing_cols:
+                logger.warning(f"[FETCH] Missing required columns for {symbol}: {missing_cols}")
+                return None
+            
+            # Sort by timestamp/datetime for proper order
+            if 'timestamp' in df.columns:
+                df = df.sort_values('timestamp').tail(fetch_limit)
+            elif 'datetime' in df.columns:
+                df = df.sort_values('datetime').tail(fetch_limit)
+            
+            logger.info(f"[FETCH] Successfully fetched {len(df)} historical candles for {symbol}")
+            return df
+            
+        except Exception as e:
+            logger.error(f"[FETCH] Error fetching historical candles for {symbol}: {e}")
+            return None
+    
+    async def analyze_symbol(self, symbol: str) -> Optional[Dict[str, Any]]:
+        """Analyze a single symbol and generate prediction (Phase 4: improved data fallback + signal generation)"""
+        try:
+            from config.settings import MIN_ANALYSIS_CANDLES, SIGNAL_MIN_FEATURE_COVERAGE
             
             # First attempt: get data with normal lookback
             historical_data = await self.data_collector.get_historical_data(
                 symbol, DEFAULT_TIMEFRAME, ML_LOOKBACK_PERIODS
             )
             
-            # Phase 3 fallback: If insufficient data, try fetching more from DB
+            # Phase 4 enhanced fallback: If insufficient data, try direct database fetch
             if historical_data is None or len(historical_data) < MIN_ANALYSIS_CANDLES:
                 current_size = len(historical_data) if historical_data is not None else 0
-                logger.warning(f"Insufficient live data for {symbol} ({current_size} samples), fetching more from historical DB...")
+                logger.warning(f"Insufficient live data for {symbol} ({current_size} samples), trying direct DB fetch...")
                 
-                # Try fetching more data from database
-                extended_data = await self.data_collector.get_historical_data(
-                    symbol, DEFAULT_TIMEFRAME, MIN_ANALYSIS_CANDLES * 2  # Get more to ensure sufficiency
-                )
+                # Use new fetch_historical_candles method
+                historical_data = await self.fetch_historical_candles(symbol, MIN_ANALYSIS_CANDLES * 2)
                 
-                if extended_data is not None and len(extended_data) >= MIN_ANALYSIS_CANDLES:
-                    historical_data = extended_data
-                    logger.info(f"Extended data fetch successful: {len(historical_data)} samples for {symbol}")
+                if historical_data is not None and len(historical_data) >= MIN_ANALYSIS_CANDLES:
+                    logger.info(f"Direct DB fetch successful: {len(historical_data)} samples for {symbol}")
                 else:
-                    logger.warning(f"Still insufficient data for {symbol} even after extended fetch")
+                    logger.warning(f"Direct DB fetch failed for {symbol}, insufficient data")
             
             # Final check for minimum data requirement
             if historical_data is None or len(historical_data) < 100:
@@ -345,8 +391,96 @@ class TradingEngine:
                 logger.warning(f"No indicators calculated for {symbol}")
                 return None
             
-            # Check if model is trained, use fallback if not (MySQL migration)
+            # Check if model is trained, use fallback if not
             if not self.ml_model.is_trained:
+                return await self.generate_fallback_signal(symbol, historical_data, indicators)
+            
+            # Phase 4: Prepare feature data using selected_features for model prediction
+            selected_features = self.ml_model.selected_features
+            if not selected_features:
+                logger.warning(f"No selected features available for {symbol}")
+                return await self.generate_fallback_signal(symbol, historical_data, indicators)
+            
+            # Build feature row with only selected features
+            feature_row = {}
+            feature_coverage = 0
+            
+            for feature_name in selected_features:
+                if feature_name in indicators:
+                    values = indicators[feature_name]
+                    if isinstance(values, (list, np.ndarray)) and len(values) > 0:
+                        # Use the last value for prediction
+                        feature_row[feature_name] = values[-1] if not pd.isna(values[-1]) else 0.0
+                        feature_coverage += 1
+                    else:
+                        feature_row[feature_name] = 0.0  # Default value for missing indicators
+                elif feature_name in ['timestamp', 'symbol_code', 'symbol']:
+                    # Handle special features
+                    if feature_name == 'timestamp' and len(historical_data) > 0:
+                        feature_row[feature_name] = pd.Timestamp.now().timestamp()
+                    elif feature_name in ['symbol_code', 'symbol']:
+                        # Encode symbol as numeric (simple hash for now)
+                        feature_row[feature_name] = hash(symbol) % 1000
+                    else:
+                        feature_row[feature_name] = 0.0
+                else:
+                    feature_row[feature_name] = 0.0  # Default for unknown features
+            
+            # Check feature coverage
+            coverage_ratio = feature_coverage / len(selected_features) if selected_features else 0
+            if coverage_ratio < SIGNAL_MIN_FEATURE_COVERAGE:
+                logger.warning(f"Low feature coverage for {symbol}: {coverage_ratio:.2f} < {SIGNAL_MIN_FEATURE_COVERAGE}")
+                # Still proceed but log the warning
+            
+            # Convert to DataFrame for model prediction
+            feature_df = pd.DataFrame([feature_row])
+            
+            # Make prediction
+            try:
+                prediction_proba = self.ml_model.model.predict_proba(feature_df)
+                prediction_class = self.ml_model.model.predict(feature_df)
+                
+                if len(prediction_proba) > 0 and len(prediction_proba[0]) >= 3:
+                    # Get confidence (max probability)
+                    confidence = float(np.max(prediction_proba[0]))
+                    predicted_class = int(prediction_class[0])
+                    
+                    # Map to signal
+                    signal_mapping = {0: 'SELL', 1: 'HOLD', 2: 'BUY'}
+                    signal = signal_mapping.get(predicted_class, 'HOLD')
+                    
+                    # Get current price
+                    current_price = float(historical_data['close'].iloc[-1]) if len(historical_data) > 0 else 0.0
+                    
+                    # Create signal record
+                    signal_record = {
+                        'symbol': symbol,
+                        'timestamp': datetime.now().isoformat(),
+                        'prediction': signal,
+                        'confidence': confidence,
+                        'predicted_class': predicted_class,
+                        'price': current_price,
+                        'feature_coverage': coverage_ratio,
+                        'features_used': len(selected_features),
+                        'data_samples': len(historical_data),
+                        'executed': False
+                    }
+                    
+                    # Store signal for persistence (Phase 4)
+                    await self._store_signal_record(signal_record)
+                    
+                    # Update latest signals
+                    self.latest_signals[symbol] = signal_record
+                    
+                    logger.info(f"Generated signal for {symbol}: {signal} (confidence: {confidence:.3f})")
+                    return signal_record
+                    
+                else:
+                    logger.warning(f"Invalid prediction format for {symbol}")
+                    return await self.generate_fallback_signal(symbol, historical_data, indicators)
+                    
+            except Exception as pred_error:
+                logger.error(f"Prediction error for {symbol}: {pred_error}")
                 return await self.generate_fallback_signal(symbol, historical_data, indicators)
             
             # Prepare feature data (use last row for prediction)
@@ -394,6 +528,37 @@ class TradingEngine:
         except Exception as e:
             logger.error(f"Symbol analysis failed for {symbol}: {e}")
             return None
+    
+    async def _store_signal_record(self, signal_record: Dict[str, Any]):
+        """Store signal record to database for persistence (Phase 4)"""
+        try:
+            from src.database.db_manager import db_manager
+            
+            # Store signal in signals table if it exists
+            insert_query = """
+                INSERT INTO signals (symbol, timestamp, prediction, confidence, predicted_class, price, feature_coverage, features_used, data_samples, executed, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """
+            
+            db_manager.execute(insert_query, (
+                signal_record['symbol'],
+                signal_record['timestamp'],
+                signal_record['prediction'],
+                signal_record['confidence'],
+                signal_record.get('predicted_class', 1),
+                signal_record['price'],
+                signal_record.get('feature_coverage', 0.0),
+                signal_record.get('features_used', 0),
+                signal_record.get('data_samples', 0),
+                signal_record['executed'],
+                datetime.now().isoformat()
+            ))
+            
+            logger.debug(f"Stored signal record for {signal_record['symbol']}")
+            
+        except Exception as e:
+            # Don't fail signal generation if storage fails
+            logger.warning(f"Failed to store signal record: {e}")
     
     async def generate_fallback_signal(self, symbol: str, historical_data: pd.DataFrame, indicators: Dict) -> Optional[Dict[str, Any]]:
         """Generate simple fallback signal when ML model not trained (MySQL migration)"""
