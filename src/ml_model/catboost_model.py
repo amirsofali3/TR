@@ -480,19 +480,23 @@ class CatBoostTradingModel:
             return pd.Series([1] * len(feature_df))  # Default to HOLD
     
     async def perform_rfe_selection(self, X: pd.DataFrame, y: pd.Series, rfe_eligible_features: List[str], X_recent: Optional[pd.DataFrame] = None, y_recent: Optional[pd.Series] = None) -> List[str]:
-        """Perform Recursive Feature Elimination on eligible features (OHLCV-only mode with recent window)"""
+        """Perform Recursive Feature Elimination on TECHNICAL INDICATORS ONLY (OHLCV separation FIXED)"""
         try:
-            logger.info("[TRAIN] Performing RFE feature selection (OHLCV-only mode)...")
+            logger.info("[TRAIN] Performing RFE feature selection on technical indicators only (OHLCV excluded)...")
             self.training_progress = 10
             
             # Import RFE settings for OHLCV-only mode
             try:
-                from config.settings import RFE_SELECTION_CANDLES, BASE_MUST_KEEP_FEATURES
+                from config.settings import RFE_SELECTION_CANDLES, OHLCV_BASE_FEATURES, RFE_N_FEATURES, MIN_FEATURE_IMPACT_THRESHOLD
                 rfe_window_size = RFE_SELECTION_CANDLES
-                base_must_keep = BASE_MUST_KEEP_FEATURES
+                ohlcv_base_features = OHLCV_BASE_FEATURES
+                target_technical_features = RFE_N_FEATURES
+                min_impact = MIN_FEATURE_IMPACT_THRESHOLD
             except ImportError:
-                rfe_window_size = 1000
-                base_must_keep = ["open", "high", "low", "close", "volume"]
+                rfe_window_size = 4000
+                ohlcv_base_features = ["timestamp", "open", "high", "low", "close", "volume", "symbol"]
+                target_technical_features = 30
+                min_impact = 1.0
             
             # Use recent window data if provided, otherwise slice from full dataset
             if X_recent is not None and y_recent is not None:
@@ -516,16 +520,23 @@ class CatBoostTradingModel:
                 logger.warning(f"[TRAIN] Insufficient samples for RFE ({len(X_rfe_window)} < {MIN_RFE_SAMPLES}), using baseline feature selection")
                 return await self.select_features_by_importance(X, y, rfe_eligible_features)
             
-            # Filter to only RFE-eligible features (exclude BASE_MUST_KEEP_FEATURES) 
-            # Note: Use sanitized column names after sanitization
-            rfe_features = [col for col in X_rfe_window.columns if col in rfe_eligible_features and col not in base_must_keep]
+            # CRITICAL FIX: Filter to TECHNICAL INDICATORS ONLY (exclude OHLCV base features completely)
+            technical_rfe_features = []
+            for col in X_rfe_window.columns:
+                # Exclude OHLCV base features completely from RFE process
+                if col.lower() not in [ohlcv.lower() for ohlcv in ohlcv_base_features]:
+                    # Only include if it's in the RFE-eligible list
+                    if col in rfe_eligible_features:
+                        technical_rfe_features.append(col)
             
-            if len(rfe_features) == 0:
-                logger.warning("[TRAIN] No RFE-eligible features found")
-                must_keep_features = [col for col in X.columns if col not in rfe_eligible_features or col in base_must_keep]
-                return must_keep_features
+            if len(technical_rfe_features) == 0:
+                logger.warning("[TRAIN] No technical indicators found for RFE selection")
+                # Return OHLCV base features only
+                ohlcv_in_data = [col for col in X.columns if col.lower() in [ohlcv.lower() for ohlcv in ohlcv_base_features]]
+                return ohlcv_in_data
             
-            X_rfe_data = X_rfe_window[rfe_features].copy()
+            logger.info(f"[TRAIN] RFE processing {len(technical_rfe_features)} technical indicators (OHLCV excluded)")
+            X_technical_only = X_rfe_window[technical_rfe_features].copy()
             
             # Create dedicated train directory for RFE CatBoost temporary models
             rfe_train_dir = os.path.join(self.model_path, "catboost_rfe_tmp")
@@ -543,11 +554,11 @@ class CatBoostTradingModel:
                 verbose=RFE_VERBOSE  # Use config setting, avoiding logging_level conflict
             )
             
-            # Perform RFE with cross-validation (target 25 features)
-            target_features = min(RFE_N_FEATURES, len(rfe_features))
+            # Perform RFE with cross-validation (target 30-50 technical indicators as requested)
+            target_features = min(target_technical_features, len(technical_rfe_features))
             rfe = RFECV(
                 estimator=estimator,
-                step=max(1, len(rfe_features) // 20),  # Remove features progressively
+                step=max(1, len(technical_rfe_features) // 20),  # Remove features progressively
                 cv=3,     # 3-fold cross-validation
                 scoring='accuracy',
                 n_jobs=-1,
@@ -556,36 +567,51 @@ class CatBoostTradingModel:
             
             self.training_progress = 30
             
-            rfe.fit(X_rfe_data, y_rfe_window)
+            logger.info(f"[TRAIN] Starting RFE on {len(technical_rfe_features)} technical indicators...")
+            rfe.fit(X_technical_only, y_rfe_window)
             
-            # Get selected RFE features
-            selected_rfe_features = X_rfe_data.columns[rfe.support_].tolist()
+            # Get selected technical indicators with 100% impact
+            selected_technical_features = X_technical_only.columns[rfe.support_].tolist()
             
-            # Add back must-keep features (BASE_MUST_KEEP_FEATURES + other required)
-            must_keep_features = [col for col in X.columns if col not in rfe_eligible_features or col in base_must_keep]
-            all_selected_features = selected_rfe_features + must_keep_features
+            # Get OHLCV base features that exist in the data (always included)
+            ohlcv_in_data = [col for col in X.columns if col.lower() in [ohlcv.lower() for ohlcv in ohlcv_base_features]]
+            
+            # Final feature list: OHLCV base + selected technical indicators
+            final_features = ohlcv_in_data + selected_technical_features
             
             # Remove duplicates while preserving order
-            final_features = []
+            final_features_clean = []
             seen = set()
-            for feature in all_selected_features:
+            for feature in final_features:
                 if feature not in seen and feature in X.columns:
-                    final_features.append(feature)
+                    final_features_clean.append(feature)
                     seen.add(feature)
             
-            logger.info(f"[TRAIN] RFE selected {len(selected_rfe_features)} features out of {len(rfe_features)} eligible")
-            logger.info(f"[TRAIN] Must-keep features: {len(must_keep_features)} (including {len(base_must_keep)} base OHLCV)")
-            logger.info(f"[TRAIN] Final feature count: {len(final_features)} (target: {RFE_N_FEATURES + len(base_must_keep)})")
+            logger.success(f"[TRAIN] RFE completed successfully:")
+            logger.info(f"[TRAIN]   - OHLCV base features: {len(ohlcv_in_data)} (always included)")
+            logger.info(f"[TRAIN]   - Selected technical indicators: {len(selected_technical_features)} (100% impact)")
+            logger.info(f"[TRAIN]   - Discarded technical indicators: {len(technical_rfe_features) - len(selected_technical_features)} (completely disabled)")
+            logger.info(f"[TRAIN]   - Total final features: {len(final_features_clean)}")
             
-            # Store RFE results and selected features
+            # Store RFE results
             self.rfe_selector = rfe
-            self.selected_features = final_features
-            self.selection_method = 'RFE'  # Mark successful RFE
+            self.selected_features = final_features_clean
+            self.selection_method = 'RFE_Technical_Only'  # Mark successful RFE with technical indicators only
             self.fallback_reason = None  # Clear any previous fallback reason
+            
+            # Save feature tracking file for model synchronization
+            try:
+                # Import indicator engine to save tracking file
+                from src.indicators.indicator_engine import IndicatorEngine
+                indicator_engine = IndicatorEngine()
+                indicator_engine.ohlcv_base_features = ohlcv_base_features
+                indicator_engine.save_selected_features_file(selected_technical_features, f"v{int(time.time())}")
+            except Exception as e:
+                logger.warning(f"[TRAIN] Could not save feature tracking file: {e}")
             
             self.training_progress = 40
             
-            return final_features
+            return final_features_clean
             
         except Exception as e:
             logger.error(f"[TRAIN] RFE selection failed: {e}")

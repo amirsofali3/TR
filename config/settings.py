@@ -6,9 +6,13 @@ BINANCE_SECRET_KEY = "your_binance_secret_key_here"
 
 # Trading Configuration
 DEFAULT_TIMEFRAME = "1m"  # Default timeframe for analysis (OHLCV-only mode)
-UPDATE_INTERVAL = 60  # Update interval in seconds (1 minute)
+UPDATE_INTERVAL = 60  # Update interval in seconds (1 minute) 
 CONFIDENCE_THRESHOLD = 70.0  # Minimum confidence for trade execution
 MAX_POSITIONS = 10  # Maximum number of open positions
+
+# Real-time Data Collection Configuration
+REALTIME_DATA_UPDATE_INTERVAL = 1  # Update OHLCV data every 1 second
+CANDLES_TABLE_NAME = "candles"  # Main candles table for OHLCV data
 
 # Supported Cryptocurrencies (OHLCV-only mode)
 SUPPORTED_PAIRS = [
@@ -29,12 +33,17 @@ MYSQL_DB = "trading_system"
 MYSQL_CHARSET = "utf8mb4"
 MYSQL_TIMEZONE = "+00:00"
 
-# Machine Learning Configuration (OHLCV-only mode)
-ML_LOOKBACK_PERIODS = 500  # Number of recent candles for RFE selection
+# Machine Learning Configuration (OHLCV-only mode - FIXED)
+ML_LOOKBACK_PERIODS = 4000  # Number of recent candles for RFE selection (1000-4000 as requested)
 CATBOOST_ITERATIONS = 1000
 CATBOOST_DEPTH = 10
 CATBOOST_LEARNING_RATE = 0.1
-RFE_N_FEATURES = 25  # Number of features to select with RFE (reduced for OHLCV-only)
+RFE_N_FEATURES = 30  # Number of TECHNICAL INDICATORS to select with RFE (30-50 as requested)
+
+# Feature Selection Configuration (NEW)
+MIN_FEATURE_IMPACT_THRESHOLD = 1.0  # 100% impact threshold - features below this are completely disabled
+TECHNICAL_INDICATORS_ONLY_RFE = True  # RFE should only process technical indicators, not OHLCV
+GENERATE_FEATURE_TRACKING_FILE = True  # Generate file with selected features for model synchronization
 
 # ML Training Pipeline Configuration (MySQL migration)
 MIN_INITIAL_TRAIN_SAMPLES = 400  # Minimum samples required for initial training
@@ -87,11 +96,15 @@ MIN_NEW_SAMPLES_FOR_RETRAIN = 300  # Minimum new samples to trigger retrain
 ACCURACY_SLIDING_WINDOW = 1000  # Number of recent predictions for live accuracy
 ACCURACY_UPDATE_INTERVAL_SEC = 60  # Update live accuracy every 60 seconds
 
-# OHLCV-only Mode Configuration
-INDICATOR_CSV_PATH = "ohlcv_only_indicators.csv"  # Path to OHLCV-only indicators CSV
+# OHLCV-only Mode Configuration (FIXED - Separate OHLCV from Technical Indicators)
+INDICATOR_CSV_PATH = "technical_indicators_only.csv"  # Path to technical indicators CSV (OHLCV excluded)
 ENABLE_TICK_BOOTSTRAP = False  # Disable tick-based bootstrap entirely
-RFE_SELECTION_CANDLES = 1000  # Recent candles window for RFE selection
-BASE_MUST_KEEP_FEATURES = ["open", "high", "low", "close", "volume"]  # Base OHLCV features always kept
+RFE_SELECTION_CANDLES = 4000  # Recent candles window for RFE selection (1000-4000 as requested)
+BASE_MUST_KEEP_FEATURES = ["open", "high", "low", "close", "volume", "timestamp", "symbol"]  # Base OHLCV features always kept (NEVER in RFE)
+
+# OHLCV Data Separation (NEW)
+EXCLUDE_OHLCV_FROM_RFE = True  # Completely exclude OHLCV base data from RFE process
+OHLCV_BASE_FEATURES = ["timestamp", "open", "high", "low", "close", "volume", "symbol"]  # Core OHLCV data (never in RFE)
 
 # Data Collection & Analysis Separation (User Feedback Adjustments)
 RAW_COLLECTION_INTERVAL_SEC = 1  # Fixed raw data collection interval

@@ -50,6 +50,13 @@ class IndicatorEngine:
         # Classification sets for improved must-keep and RFE detection
         self.must_keep_indicator_set = set()  # Case-insensitive must-keep indicator names
         self.rfe_indicator_set = set()  # Case-insensitive RFE-eligible indicator names
+        
+        # OHLCV Separation (NEW - FIXED)
+        self.ohlcv_base_features = []  # Base OHLCV features (never processed by RFE)
+        self.technical_indicators = []  # Only technical indicators (for RFE processing)
+        
+        # Feature tracking file path
+        self.feature_tracking_file = "selected_features.json"
     
     def _sanitize_indicator_name(self, name: str) -> str:
         """Sanitize indicator name for consistent matching (case-insensitive, normalized)"""
@@ -126,21 +133,35 @@ class IndicatorEngine:
         return self._sanitize_indicator_name(feature_name)
         
     async def initialize(self):
-        """Initialize the indicator engine"""
+        """Initialize the indicator engine with OHLCV separation"""
         try:
-            logger.info("Initializing indicator engine...")
+            logger.info("[INDICATORS] Initializing indicator engine with OHLCV separation...")
             
-            # Load indicators configuration from CSV
+            # Initialize OHLCV base features first (never processed by RFE)
+            self._initialize_ohlcv_base_features()
+            
+            # Load technical indicators configuration from CSV (excluding OHLCV)
             await self.load_indicators_config()
             
             # Setup indicator functions
             self.setup_indicator_functions()
             
-            logger.success(f"Indicator engine initialized with {len(self.indicators_config)} indicators")
+            logger.success(f"[INDICATORS] Engine initialized - OHLCV base: {len(self.ohlcv_base_features)}, Technical indicators: {len(self.indicators_config)}")
             
         except Exception as e:
-            logger.error(f"Failed to initialize indicator engine: {e}")
+            logger.error(f"[INDICATORS] Failed to initialize: {e}")
             raise
+    
+    def _initialize_ohlcv_base_features(self):
+        """Initialize OHLCV base features that are never processed by RFE"""
+        try:
+            from config.settings import OHLCV_BASE_FEATURES
+            self.ohlcv_base_features = OHLCV_BASE_FEATURES.copy()
+        except ImportError:
+            self.ohlcv_base_features = ["timestamp", "open", "high", "low", "close", "volume", "symbol"]
+        
+        logger.info(f"[INDICATORS] OHLCV base features: {self.ohlcv_base_features}")
+        logger.info("[INDICATORS] These features will NEVER be processed by RFE - they are always available as base data")
     
     async def load_indicators_config(self):
         """Load indicators configuration from CSV file (OHLCV-only mode)"""
@@ -773,51 +794,103 @@ class IndicatorEngine:
     # New methods for Complete Pipeline Restructure
     
     def get_must_keep_features(self) -> List[str]:
-        """Get final list of must-keep feature names after calculation (case-insensitive merge)"""
-        try:
-            from config.settings import BASE_MUST_KEEP_FEATURES
-            base_list = BASE_MUST_KEEP_FEATURES
-        except ImportError:
-            base_list = ["open", "high", "low", "close", "volume"]
+        """Get final list of must-keep feature names after calculation (OHLCV separation FIXED)"""
+        # OHLCV base features are ALWAYS kept but NEVER processed by RFE
+        ohlcv_features = self.ohlcv_base_features.copy()
         
-        # Map of lowercase -> original computed name if exists
+        # Add any computed technical indicators that are marked as must-keep
         computed_map = {c.lower(): c for c in self.must_keep_features}
-        ordered = []
-        # First, base order
-        for b in base_list:
-            lb = b.lower()
-            if lb in computed_map:
-                name = computed_map[lb]
-                if name not in ordered:
-                    ordered.append(name)
-            else:
-                # If base not computed (rare), still record lowercase base to keep semantics
-                if b not in ordered:
-                    ordered.append(b)
-        # Then other must_keep features preserving insertion order
+        ordered = ohlcv_features.copy()  # Start with OHLCV base
+        
+        # Add other must_keep technical indicators 
         for f in self.must_keep_features:
-            if f not in ordered:
-                ordered.append(f)
+            if f.lower() not in [ohlcv.lower() for ohlcv in self.ohlcv_base_features]:
+                if f not in ordered:
+                    ordered.append(f)
+        
+        logger.debug(f"[INDICATORS] Must-keep features: OHLCV base ({len(ohlcv_features)}) + Technical ({len(ordered) - len(ohlcv_features)}) = {len(ordered)} total")
         return ordered
     
     def get_rfe_candidates(self) -> List[str]:
-        """Get final list of RFE candidate feature names after calculation"""
-        return self.rfe_candidates.copy()
+        """Get final list of RFE candidate feature names after calculation (OHLCV separation FIXED)"""
+        # Only technical indicators can be RFE candidates - NEVER OHLCV base features
+        technical_rfe_candidates = []
+        
+        for candidate in self.rfe_candidates:
+            # Exclude OHLCV base features from RFE candidates completely
+            if candidate.lower() not in [ohlcv.lower() for ohlcv in self.ohlcv_base_features]:
+                technical_rfe_candidates.append(candidate)
+        
+        logger.debug(f"[INDICATORS] RFE candidates: {len(technical_rfe_candidates)} technical indicators (OHLCV excluded)")
+        return technical_rfe_candidates
+    
+    def save_selected_features_file(self, selected_technical_features: List[str], model_version: str = "1.0"):
+        """Save selected technical features to JSON file for model synchronization (NEW)"""
+        try:
+            import json
+            from datetime import datetime
+            
+            feature_data = {
+                "model_version": model_version,
+                "timestamp": datetime.now().isoformat(),
+                "ohlcv_base_features": self.ohlcv_base_features.copy(),
+                "selected_technical_features": selected_technical_features.copy(),
+                "total_features": len(self.ohlcv_base_features) + len(selected_technical_features),
+                "rfe_config": {
+                    "target_features": getattr(self, '_rfe_target_features', 30),
+                    "selection_method": "RFE",
+                    "impact_threshold": "100%"
+                }
+            }
+            
+            with open(self.feature_tracking_file, 'w') as f:
+                json.dump(feature_data, f, indent=2)
+            
+            logger.success(f"[INDICATORS] Feature tracking file saved: {self.feature_tracking_file}")
+            logger.info(f"[INDICATORS] Model will use: {len(self.ohlcv_base_features)} OHLCV + {len(selected_technical_features)} technical features")
+            
+        except Exception as e:
+            logger.error(f"[INDICATORS] Failed to save feature tracking file: {e}")
+    
+    def load_selected_features_file(self) -> Dict[str, Any]:
+        """Load selected features from JSON file for model synchronization (NEW)"""
+        try:
+            import json
+            import os
+            
+            if not os.path.exists(self.feature_tracking_file):
+                logger.warning(f"[INDICATORS] Feature tracking file not found: {self.feature_tracking_file}")
+                return {}
+            
+            with open(self.feature_tracking_file, 'r') as f:
+                feature_data = json.load(f)
+            
+            logger.success(f"[INDICATORS] Feature tracking file loaded: {self.feature_tracking_file}")
+            logger.info(f"[INDICATORS] Model version: {feature_data.get('model_version', 'unknown')}")
+            
+            return feature_data
+            
+        except Exception as e:
+            logger.error(f"[INDICATORS] Failed to load feature tracking file: {e}")
+            return {}
     
     def get_skipped_indicators(self) -> List[Dict[str, str]]:
         """Get list of indicators that were skipped with reasons"""
         return self.skipped_indicators.copy()
     
     def get_indicators_summary(self) -> Dict[str, Any]:
-        """Get comprehensive summary of indicators status (Complete Pipeline Restructure)"""
+        """Get comprehensive summary of indicators status (OHLCV separation FIXED)"""
         return {
             'total_defined': len(self.indicators_config),
             'must_keep_count': len(self.required_indicators),
             'rfe_candidate_count': len(self.rfe_eligible_indicators),
             'computed_count': len(self.computed_indicators),
             'skipped': self.get_skipped_indicators(),
+            'ohlcv_base_features': self.ohlcv_base_features,
+            'ohlcv_base_count': len(self.ohlcv_base_features),
             'must_keep_features': self.get_must_keep_features(),
-            'rfe_candidates': self.get_rfe_candidates()
+            'rfe_candidates': self.get_rfe_candidates(),
+            'technical_indicators_only_rfe': True  # Indicates OHLCV separation is active
         }
     
     def get_all_feature_names(self) -> List[str]:
