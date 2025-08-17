@@ -258,6 +258,9 @@ class CatBoostTradingModel:
                 'samples_after': rows_after
             }
             
+            # Store sanitization stats for reporting
+            self.last_sanitization_stats = metadata
+            
             return sanitized_df, metadata
             
         except Exception as e:
@@ -430,12 +433,18 @@ class CatBoostTradingModel:
             
             logger.info(f"[TRAIN] RFE window: {len(X_rfe_window)} samples (target: {rfe_window_size})")
             
+            # Sanitize RFE window features to handle symbol encoding and other issues
+            logger.info("[TRAIN] Sanitizing RFE window features...")
+            X_rfe_window, rfe_sanitization_stats = self._sanitize_features(X_rfe_window)
+            logger.info(f"[TRAIN] RFE sanitization: {rfe_sanitization_stats['initial_feature_count']} → {rfe_sanitization_stats['final_feature_count']} features")
+            
             # Guard: Check minimum samples for RFE
             if len(X_rfe_window) < MIN_RFE_SAMPLES:
                 logger.warning(f"[TRAIN] Insufficient samples for RFE ({len(X_rfe_window)} < {MIN_RFE_SAMPLES}), using baseline feature selection")
                 return await self.select_features_by_importance(X, y, rfe_eligible_features)
             
-            # Filter to only RFE-eligible features (exclude BASE_MUST_KEEP_FEATURES)
+            # Filter to only RFE-eligible features (exclude BASE_MUST_KEEP_FEATURES) 
+            # Note: Use sanitized column names after sanitization
             rfe_features = [col for col in X_rfe_window.columns if col in rfe_eligible_features and col not in base_must_keep]
             
             if len(rfe_features) == 0:
@@ -445,13 +454,20 @@ class CatBoostTradingModel:
             
             X_rfe_data = X_rfe_window[rfe_features].copy()
             
+            # Create dedicated train directory for RFE CatBoost temporary models
+            rfe_train_dir = os.path.join(self.model_path, "catboost_rfe_tmp")
+            os.makedirs(rfe_train_dir, exist_ok=True)
+            
             # Use a simpler model for RFE to speed up the process
             estimator = CatBoostClassifier(
                 iterations=100,
                 depth=6,
                 learning_rate=0.1,
                 logging_level='Silent',
-                random_seed=42
+                random_seed=42,
+                train_dir=rfe_train_dir,
+                allow_writing_files=True,
+                verbose=False
             )
             
             # Perform RFE with cross-validation (target 25 features)
@@ -506,8 +522,17 @@ class CatBoostTradingModel:
         try:
             logger.info("[TRAIN] Using feature importance for selection...")
             
+            # Sanitize features if not already sanitized
+            logger.info("[TRAIN] Sanitizing features for importance selection...")
+            X_sanitized, importance_sanitization_stats = self._sanitize_features(X)
+            logger.info(f"[TRAIN] Importance sanitization: {importance_sanitization_stats['initial_feature_count']} → {importance_sanitization_stats['final_feature_count']} features")
+            
             # Cap features to MAX_BASELINE_FEATURES when RFE is skipped (MySQL migration)
             max_features = min(MAX_BASELINE_FEATURES, len(rfe_eligible_features))
+            
+            # Create dedicated train directory for importance CatBoost temporary models
+            importance_train_dir = os.path.join(self.model_path, "catboost_importance_tmp")
+            os.makedirs(importance_train_dir, exist_ok=True)
             
             # Train a quick model to get feature importance
             temp_model = CatBoostClassifier(
@@ -515,14 +540,17 @@ class CatBoostTradingModel:
                 depth=4,
                 learning_rate=0.1,
                 logging_level='Silent',
-                random_seed=42
+                random_seed=42,
+                train_dir=importance_train_dir,
+                allow_writing_files=True,
+                verbose=False
             )
             
-            temp_model.fit(X, y)
+            temp_model.fit(X_sanitized, y)
             
             # Get feature importance
             importance_df = pd.DataFrame({
-                'feature': X.columns,
+                'feature': X_sanitized.columns,
                 'importance': temp_model.get_feature_importance()
             }).sort_values('importance', ascending=False)
             
@@ -531,8 +559,8 @@ class CatBoostTradingModel:
                 importance_df['feature'].isin(rfe_eligible_features)
             ].head(max_features)['feature'].tolist()
             
-            # Add required features
-            required_features = [col for col in X.columns if col not in rfe_eligible_features]
+            # Add required features (from sanitized columns)
+            required_features = [col for col in X_sanitized.columns if col not in rfe_eligible_features]
             all_selected_features = rfe_features + required_features
             
             logger.info(f"[TRAIN] Selected {len(rfe_features)} top important features (max {max_features})")
@@ -541,7 +569,12 @@ class CatBoostTradingModel:
             
         except Exception as e:
             logger.error(f"[TRAIN] Feature importance selection failed: {e}")
-            return list(X.columns)  # Return all features as fallback
+            # Try to return sanitized features if available, otherwise original features
+            try:
+                X_sanitized, _ = self._sanitize_features(X)
+                return list(X_sanitized.columns)
+            except:
+                return list(X.columns)  # Return all original features as final fallback
     
     def setup_feature_weights(self, selected_features: List[str], all_features: List[str]):
         """Setup feature weights (active vs inactive)"""
@@ -633,6 +666,18 @@ class CatBoostTradingModel:
             self.current_training_stage = 'sanitizing'
             logger.info("[TRAIN] Stage 1/6: Data sanitization...")
             
+            # Sanitize main training features early
+            logger.info("[TRAIN] Sanitizing main training features...")
+            X_sanitized, main_sanitization_stats = self._sanitize_features(X)
+            logger.info(f"[TRAIN] Main sanitization: {main_sanitization_stats['initial_feature_count']} → {main_sanitization_stats['final_feature_count']} features")
+            
+            # Sanitize recent features if provided
+            X_recent_sanitized = None
+            if X_recent is not None:
+                logger.info("[TRAIN] Sanitizing recent training features...")
+                X_recent_sanitized, recent_sanitization_stats = self._sanitize_features(X_recent)
+                logger.info(f"[TRAIN] Recent sanitization: {recent_sanitization_stats['initial_feature_count']} → {recent_sanitization_stats['final_feature_count']} features")
+            
             # Encode labels and calculate class distribution
             y_encoded = self.label_encoder.fit_transform(y)
             
@@ -658,7 +703,7 @@ class CatBoostTradingModel:
             
             # Split data
             X_train, X_test, y_train, y_test = train_test_split(
-                X, y_encoded, test_size=0.2, random_state=42, stratify=y_encoded
+                X_sanitized, y_encoded, test_size=0.2, random_state=42, stratify=y_encoded
             )
             
             logger.info(f"[TRAIN] Train samples: {len(X_train)}, Test samples: {len(X_test)}")
@@ -668,13 +713,13 @@ class CatBoostTradingModel:
             self.current_training_stage = 'feature_selection'
             logger.info("[TRAIN] Stage 3/6: Feature selection...")
             
-            # Perform RFE feature selection with progress tracking
-            selected_features = await self.perform_rfe_selection(X_train, y_train, rfe_eligible_features, X_recent, y_recent)
+            # Perform RFE feature selection with progress tracking (using sanitized data)
+            selected_features = await self.perform_rfe_selection(X_train, y_train, rfe_eligible_features, X_recent_sanitized, y_recent)
             self.selected_features = selected_features
             self.selected_feature_count = len(selected_features)
             
-            # Setup feature weights
-            self.setup_feature_weights(selected_features, list(X.columns))
+            # Setup feature weights (use sanitized column names)
+            self.setup_feature_weights(selected_features, list(X_sanitized.columns))
             
             # Apply feature selection
             X_train_selected = X_train[selected_features]

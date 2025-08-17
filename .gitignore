@@ -78,4 +78,4 @@ test.log
 *.json
 
 # Test files
-test_ohlcv_*.py
+test_ohlcv_*.py*.py\ntest_*.py\nvalidate_*.py\ndemo_*.py
