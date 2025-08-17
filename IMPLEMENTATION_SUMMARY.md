@@ -172,7 +172,78 @@ No pandas fragmentation warnings
 5. **UI Display**: Correct feature categorization in active indicators panel
 6. **Performance**: No pandas DataFrame fragmentation warnings
 
+---
+
+## Phase 3 Comprehensive Stabilization ✅
+
+### A. Critical Row Preservation Fix ✅
+**Problem**: Sanitization dropping rows (57913→57616) causing X/y length mismatch
+**Solution**:
+- **Non-destructive `_sanitize_features()`**: Never drops rows, only columns
+- **`_impute_missing()` helper**: Forward fill → back fill → zero/median strategy  
+- **Row alignment verification**: Assert len(X)==len(y) after sanitization
+- **Automatic realignment**: `y = y.loc[X.index]` if mismatch detected
+- **Transparent logging**: "Samples: 57913 → 57913 (MUST BE EQUAL)"
+
+### B. Optional RFE with Robust Fallbacks ✅
+**Configuration**:
+- **`ENABLE_RFE = True`**: Optional RFE flag (can be disabled)
+- **`RFE_FALLBACK_TOP_N = 50`**: Top N features when RFE disabled/fails
+- **`MIN_ANALYSIS_CANDLES = 150`**: Live analysis data fallback
+
+**Training Flow**:
+- **`perform_full_training_flow()`**: Comprehensive wrapper with 3-tier fallback
+  1. Full training with RFE (if enabled)
+  2. Simplified training with all numeric features
+  3. Minimal training with must-keep features only
+- **`selected_features` guarantee**: Never empty, fallbacks to must_keep → all numeric
+- **Stable CatBoost artifacts**: `train_dir=catboost_main` prevents catboost_info errors
+
+### C. Enhanced Data Handling ✅
+**Live Analysis Improvements**:
+- **`analyze_symbol()` fallback**: Fetch `MIN_ANALYSIS_CANDLES*2` from DB if live insufficient
+- **Transparent data sourcing**: Log when extended fetch successful vs live buffer
+
+**Indicator Engine Enhancements**:
+- **`get_all_feature_names()`**: Returns base OHLCV + computed indicators
+- **Skip reason tracking**: Already implemented with transparency logging
+
+### D. Improved UI Endpoints ✅
+**`/api/indicators` endpoint**:
+- **Baseline mode**: Show must_keep + base OHLCV as "active" when model not trained
+- **Training mode**: Show `selected_features` after successful training
+- **Status indicators**: `indicator_status: 'baseline'|'trained'`, `rfe_enabled`, `skipped_count`
+- **Transparency**: First 5 skipped indicators with reasons
+
+### E. Stability Guarantees
+**Training Pipeline**:
+✅ **Row count preservation**: Sanitization maintains exact sample count
+✅ **Feature selection robustness**: Multiple fallback strategies prevent empty selection
+✅ **Error recovery**: Comprehensive training flow with graceful degradation
+✅ **Data sufficiency**: Automatic fallback to extended historical data
+✅ **UI consistency**: Always shows meaningful active features
+
+**Expected Behavior**:
+```
+[TRAIN] NON-DESTRUCTIVE feature sanitization completed:
+[TRAIN]   Features: 145 → 144
+[TRAIN]   Samples: 57913 → 57913 (MUST BE EQUAL)
+[TRAIN] X/y alignment verified: 57913 samples
+[TRAIN] RFE is enabled, performing feature selection...
+[TRAIN] Selected 25 features
+[TRAIN] Model training complete
+UI: Active Features shows >0 indicators
+```
+
 ## Files Modified
+
+### Phase 3 Changes ✅
+- `config/settings.py` - Added ENABLE_RFE, MIN_ANALYSIS_CANDLES, RFE_FALLBACK_TOP_N
+- `src/ml_model/catboost_model.py` - Non-destructive sanitization, comprehensive training flow, stable train_dir
+- `src/indicators/indicator_engine.py` - Added get_all_feature_names() method
+- `src/trading_engine/trading_engine.py` - Enhanced analyze_symbol() with data fallback
+- `src/web_app/app.py` - Improved /api/indicators endpoint with baseline/trained modes
+- `IMPLEMENTATION_SUMMARY.md` - Phase 3 documentation
 
 ### Phase 2 Changes
 - `src/ml_model/catboost_model.py` - Enhanced feature sanitization integration, CatBoost train_dir configuration

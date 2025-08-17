@@ -714,6 +714,151 @@ class CatBoostTradingModel:
         
         logger.info(f"Setup weights: {len(selected_features)} active, {len(all_features) - len(selected_features)} inactive")
     
+    async def perform_full_training_flow(self, X: pd.DataFrame, y: pd.Series, rfe_eligible_features: List[str], X_recent: Optional[pd.DataFrame] = None, y_recent: Optional[pd.Series] = None) -> bool:
+        """Comprehensive training flow with multiple fallback strategies - Phase 3 addition"""
+        try:
+            logger.info("[TRAIN] Starting comprehensive training flow with fallback strategies...")
+            
+            # Attempt 1: Full training with RFE (if enabled)
+            try:
+                success = await self.train_model(X, y, rfe_eligible_features, X_recent, y_recent)
+                if success:
+                    logger.success("[TRAIN] Full training flow completed successfully")
+                    return True
+                else:
+                    logger.warning("[TRAIN] Full training flow failed, trying fallback strategies...")
+            except Exception as e:
+                logger.error(f"[TRAIN] Full training failed: {e}")
+                self.last_training_error = f"Full training: {str(e)}"
+            
+            # Attempt 2: Simplified training with all numeric features (no RFE)
+            try:
+                logger.info("[TRAIN] Attempting simplified training with all numeric features...")
+                
+                # Ensure we have numeric data
+                X_simplified, _ = self._sanitize_features(X)
+                if len(X_simplified.columns) == 0:
+                    logger.error("[TRAIN] No numeric features available for simplified training")
+                    return False
+                
+                # Use all numeric features as "selected"
+                all_numeric_features = list(X_simplified.columns)
+                self.selected_features = all_numeric_features
+                self.selected_feature_count = len(all_numeric_features)
+                
+                logger.info(f"[TRAIN] Simplified training with {len(all_numeric_features)} features")
+                
+                # Try basic model training without complex RFE
+                success = await self._train_simplified_model(X_simplified, y)
+                if success:
+                    logger.success("[TRAIN] Simplified training completed successfully")
+                    return True
+                    
+            except Exception as e:
+                logger.error(f"[TRAIN] Simplified training failed: {e}")
+                self.last_training_error = f"Simplified training: {str(e)}"
+            
+            # Attempt 3: Minimal model with just must-keep features
+            try:
+                logger.info("[TRAIN] Attempting minimal training with must-keep features only...")
+                
+                from config.settings import BASE_MUST_KEEP_FEATURES
+                must_keep_features = BASE_MUST_KEEP_FEATURES or ["open", "high", "low", "close", "volume"]
+                
+                # Filter to existing columns
+                available_must_keep = [col for col in must_keep_features if col in X.columns]
+                
+                if len(available_must_keep) < 3:
+                    logger.error("[TRAIN] Not enough must-keep features for minimal training")
+                    return False
+                
+                X_minimal = X[available_must_keep]
+                self.selected_features = available_must_keep
+                self.selected_feature_count = len(available_must_keep)
+                
+                logger.info(f"[TRAIN] Minimal training with {len(available_must_keep)} must-keep features")
+                
+                success = await self._train_simplified_model(X_minimal, y)
+                if success:
+                    logger.success("[TRAIN] Minimal training completed successfully")
+                    return True
+                    
+            except Exception as e:
+                logger.error(f"[TRAIN] Minimal training failed: {e}")
+                self.last_training_error = f"Minimal training: {str(e)}"
+            
+            # All attempts failed
+            logger.error("[TRAIN] All training strategies failed")
+            self.last_training_error = "All training strategies failed"
+            return False
+            
+        except Exception as e:
+            logger.error(f"[TRAIN] Comprehensive training flow failed: {e}")
+            self.last_training_error = f"Training flow error: {str(e)}"
+            return False
+    
+    async def _train_simplified_model(self, X: pd.DataFrame, y: pd.Series) -> bool:
+        """Train a simplified model without complex features - Phase 3 helper"""
+        try:
+            # Basic data validation
+            if len(X) == 0 or len(y) == 0 or len(X) != len(y):
+                logger.error(f"[TRAIN] Invalid data for simplified training: X={len(X)}, y={len(y)}")
+                return False
+            
+            # Encode labels
+            if self.label_encoder is None:
+                self.label_encoder = LabelEncoder()
+            
+            y_encoded = self.label_encoder.fit_transform(y)
+            
+            # Simple train/test split
+            X_train, X_test, y_train, y_test = train_test_split(
+                X, y_encoded, test_size=0.2, random_state=42, stratify=y_encoded
+            )
+            
+            # Create simple CatBoost model
+            simple_train_dir = os.path.join(self.model_path, "catboost_simple")
+            os.makedirs(simple_train_dir, exist_ok=True)
+            
+            self.model = CatBoostClassifier(
+                iterations=min(500, CATBOOST_ITERATIONS // 2),  # Fewer iterations for simplified model
+                depth=min(6, CATBOOST_DEPTH),
+                learning_rate=CATBOOST_LEARNING_RATE,
+                loss_function='MultiClass',
+                eval_metric='MultiClass',
+                random_seed=42,
+                logging_level='Silent',
+                train_dir=simple_train_dir,
+                allow_writing_files=True
+            )
+            
+            # Train the model
+            self.model.fit(X_train, y_train, verbose=False)
+            
+            # Evaluate
+            y_pred = self.model.predict(X_test)
+            accuracy = accuracy_score(y_test, y_pred)
+            
+            # Store basic performance
+            self.model_performance = {
+                'accuracy': accuracy,
+                'training_samples': len(X_train),
+                'test_samples': len(X_test),
+                'selected_features': len(X.columns),
+                'training_date': datetime.now().isoformat(),
+                'model_type': 'simplified'
+            }
+            
+            self.is_trained = True
+            self.last_training_time = datetime.now()
+            logger.info(f"[TRAIN] Simplified model trained with accuracy: {accuracy:.4f}")
+            
+            return True
+            
+        except Exception as e:
+            logger.error(f"[TRAIN] Simplified model training failed: {e}")
+            return False
+    
     async def train_model(self, X: pd.DataFrame, y: pd.Series, rfe_eligible_features: List[str], X_recent: Optional[pd.DataFrame] = None, y_recent: Optional[pd.Series] = None):
         """Train the CatBoost model with staged progress and model preservation (OHLCV-only mode)"""
         try:

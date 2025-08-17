@@ -303,16 +303,38 @@ class TradingEngine:
             logger.error(f"Market analysis failed: {e}")
     
     async def analyze_symbol(self, symbol: str) -> Optional[Dict[str, Any]]:
-        """Analyze a single symbol and generate prediction (MySQL migration improved)"""
+        """Analyze a single symbol and generate prediction (MySQL migration improved + Phase 3 data fallback)"""
         try:
-            # Get historical data
+            # Phase 3: Get historical data with fallback logic
+            from config.settings import MIN_ANALYSIS_CANDLES
+            
+            # First attempt: get data with normal lookback
             historical_data = await self.data_collector.get_historical_data(
                 symbol, DEFAULT_TIMEFRAME, ML_LOOKBACK_PERIODS
             )
             
+            # Phase 3 fallback: If insufficient data, try fetching more from DB
+            if historical_data is None or len(historical_data) < MIN_ANALYSIS_CANDLES:
+                current_size = len(historical_data) if historical_data is not None else 0
+                logger.warning(f"Insufficient live data for {symbol} ({current_size} samples), fetching more from historical DB...")
+                
+                # Try fetching more data from database
+                extended_data = await self.data_collector.get_historical_data(
+                    symbol, DEFAULT_TIMEFRAME, MIN_ANALYSIS_CANDLES * 2  # Get more to ensure sufficiency
+                )
+                
+                if extended_data is not None and len(extended_data) >= MIN_ANALYSIS_CANDLES:
+                    historical_data = extended_data
+                    logger.info(f"Extended data fetch successful: {len(historical_data)} samples for {symbol}")
+                else:
+                    logger.warning(f"Still insufficient data for {symbol} even after extended fetch")
+            
+            # Final check for minimum data requirement
             if historical_data is None or len(historical_data) < 100:
-                logger.warning(f"Insufficient data for {symbol}")
+                logger.warning(f"Insufficient data for {symbol}: {len(historical_data) if historical_data is not None else 0} samples")
                 return None
+            
+            logger.debug(f"Analysis data for {symbol}: {len(historical_data)} samples")
             
             # Calculate all indicators
             indicators = await self.indicator_engine.calculate_all_indicators(

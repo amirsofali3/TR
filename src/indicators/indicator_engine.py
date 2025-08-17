@@ -819,3 +819,28 @@ class IndicatorEngine:
             'must_keep_features': self.get_must_keep_features(),
             'rfe_candidates': self.get_rfe_candidates()
         }
+    
+    def get_all_feature_names(self) -> List[str]:
+        """Get all feature names (base OHLCV + computed indicators) - Phase 3 addition"""
+        try:
+            from config.settings import BASE_MUST_KEEP_FEATURES
+            base_features = BASE_MUST_KEEP_FEATURES or ["open", "high", "low", "close", "volume"]
+        except ImportError:
+            base_features = ["open", "high", "low", "close", "volume"]
+        
+        # Combine base features with computed indicators
+        all_features = base_features.copy()
+        
+        # Add all computed indicators (from successful calculations)
+        for indicator_name in self.computed_indicators:
+            if indicator_name not in all_features:
+                all_features.append(indicator_name)
+        
+        # Also add timestamp and symbol_code if they exist
+        additional_features = ["timestamp", "symbol_code"]
+        for feat in additional_features:
+            if feat not in all_features:
+                all_features.append(feat)
+        
+        logger.debug(f"[INDICATORS] All feature names: {len(all_features)} features")
+        return all_features
