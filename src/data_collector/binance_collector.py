@@ -12,9 +12,22 @@ from typing import Dict, List, Optional, Tuple
 from loguru import logger
 import time
 import sqlite3
-from binance.client import Client
-from binance.exceptions import BinanceAPIException
-import ccxt.async_support as ccxt
+# Import binance with fallback to stub
+try:
+    from binance.client import Client
+    from binance.exceptions import BinanceAPIException
+    BINANCE_AVAILABLE = True
+except ImportError:
+    from binance_stub import Client, BinanceAPIException  
+    BINANCE_AVAILABLE = False
+    logger.warning("python-binance not available - using stub for testing")
+
+try:
+    import ccxt.async_support as ccxt
+    CCXT_AVAILABLE = True
+except ImportError:
+    CCXT_AVAILABLE = False
+    logger.warning("ccxt not available - using public API only")
 
 # Import database manager for MySQL migration
 from src.database.db_manager import db_manager
@@ -66,13 +79,16 @@ class BinanceDataCollector:
                     testnet=DEMO_MODE
                 )
                 
-                # Initialize CCXT for additional functionality
-                self.ccxt_exchange = ccxt.binance({
-                    'apiKey': BINANCE_API_KEY,
-                    'secret': BINANCE_SECRET_KEY,
-                    'sandbox': DEMO_MODE,
-                    'enableRateLimit': True,
-                })
+                # Initialize CCXT for additional functionality if available
+                if CCXT_AVAILABLE:
+                    self.ccxt_exchange = ccxt.binance({
+                        'apiKey': BINANCE_API_KEY,
+                        'secret': BINANCE_SECRET_KEY,
+                        'sandbox': DEMO_MODE,
+                        'enableRateLimit': True,
+                    })
+                else:
+                    logger.info("CCXT not available - using python-binance only")
                 
                 # Test API connection
                 try:
@@ -683,6 +699,193 @@ class BinanceDataCollector:
             
         except Exception as e:
             logger.error(f"[COLLECT] Failed to aggregate data for {symbol}: {e}")
+    
+    async def start_realtime_data_collection(self):
+        """Start continuous real-time data collection for candles table (NEW)"""
+        try:
+            logger.info("[REALTIME] Starting continuous real-time data collection...")
+            
+            from src.data_access.candle_data_manager import candle_data_manager
+            
+            while self.running:
+                try:
+                    # Collect latest 1-minute candles for all supported pairs
+                    for symbol in SUPPORTED_PAIRS:
+                        await self._collect_latest_candle(symbol)
+                    
+                    # Wait for next update cycle (1 second as configured)
+                    from config.settings import REALTIME_DATA_UPDATE_INTERVAL
+                    await asyncio.sleep(REALTIME_DATA_UPDATE_INTERVAL)
+                    
+                except Exception as e:
+                    logger.error(f"[REALTIME] Error in data collection cycle: {e}")
+                    await asyncio.sleep(5)  # Wait 5 seconds on error
+            
+            logger.info("[REALTIME] Real-time data collection stopped")
+            
+        except Exception as e:
+            logger.error(f"[REALTIME] Failed to start real-time data collection: {e}")
+    
+    async def _collect_latest_candle(self, symbol: str):
+        """Collect the latest 1-minute candle for a symbol (NEW)"""
+        try:
+            # Get latest kline data from Binance
+            if self.client:
+                # Use authenticated client if available
+                klines = self.client.get_klines(
+                    symbol=symbol,
+                    interval=Client.KLINE_INTERVAL_1MINUTE,
+                    limit=1
+                )
+            else:
+                # Use public API via aiohttp
+                url = f"https://api.binance.com/api/v3/klines"
+                params = {
+                    'symbol': symbol,
+                    'interval': '1m',
+                    'limit': 1
+                }
+                
+                async with aiohttp.ClientSession() as session:
+                    async with session.get(url, params=params) as response:
+                        if response.status == 200:
+                            klines = await response.json()
+                        else:
+                            logger.error(f"[REALTIME] Failed to get data for {symbol}: HTTP {response.status}")
+                            return
+            
+            if not klines:
+                return
+                
+            # Extract OHLCV data
+            kline = klines[0]
+            timestamp = int(kline[0])  # Open time
+            open_price = float(kline[1])
+            high_price = float(kline[2])
+            low_price = float(kline[3])
+            close_price = float(kline[4])
+            volume = float(kline[5])
+            
+            # Update candles table via candle_data_manager
+            from src.data_access.candle_data_manager import candle_data_manager
+            await candle_data_manager.update_realtime_candle(
+                symbol, timestamp, open_price, high_price, low_price, close_price, volume
+            )
+            
+            logger.debug(f"[REALTIME] Updated candle for {symbol}: {close_price}")
+            
+        except Exception as e:
+            logger.error(f"[REALTIME] Failed to collect latest candle for {symbol}: {e}")
+    
+    async def get_current_prices(self, symbols: Optional[List[str]] = None) -> Dict[str, float]:
+        """Get current prices for symbols (NEW - for real-time indicator calculations)"""
+        try:
+            if symbols is None:
+                symbols = SUPPORTED_PAIRS
+            
+            prices = {}
+            
+            if self.client:
+                # Use authenticated client for ticker prices
+                ticker_prices = self.client.get_all_tickers()
+                price_map = {ticker['symbol']: float(ticker['price']) for ticker in ticker_prices}
+                
+                for symbol in symbols:
+                    if symbol in price_map:
+                        prices[symbol] = price_map[symbol]
+            else:
+                # Use public API
+                url = "https://api.binance.com/api/v3/ticker/price"
+                
+                async with aiohttp.ClientSession() as session:
+                    async with session.get(url) as response:
+                        if response.status == 200:
+                            ticker_data = await response.json()
+                            price_map = {ticker['symbol']: float(ticker['price']) for ticker in ticker_data}
+                            
+                            for symbol in symbols:
+                                if symbol in price_map:
+                                    prices[symbol] = price_map[symbol]
+            
+            logger.debug(f"[REALTIME] Retrieved current prices for {len(prices)} symbols")
+            return prices
+            
+        except Exception as e:
+            logger.error(f"[REALTIME] Failed to get current prices: {e}")
+            return {}
+    
+    async def load_historical_data_to_candles(self, symbols: Optional[List[str]] = None, days_back: int = 30):
+        """Load historical 1-minute candle data into candles table for initial training (NEW)"""
+        try:
+            if symbols is None:
+                symbols = SUPPORTED_PAIRS
+            
+            logger.info(f"[HISTORICAL] Loading {days_back} days of historical data for {len(symbols)} symbols...")
+            
+            from src.data_access.candle_data_manager import candle_data_manager
+            
+            for symbol in symbols:
+                try:
+                    logger.info(f"[HISTORICAL] Loading data for {symbol}...")
+                    
+                    if self.client:
+                        # Use authenticated client
+                        klines = self.client.get_historical_klines(
+                            symbol=symbol,
+                            interval=Client.KLINE_INTERVAL_1MINUTE,
+                            start_str=f"{days_back} days ago UTC"
+                        )
+                    else:
+                        # Use public API
+                        url = f"https://api.binance.com/api/v3/klines"
+                        params = {
+                            'symbol': symbol,
+                            'interval': '1m',
+                            'limit': 1000  # Max limit for public API
+                        }
+                        
+                        async with aiohttp.ClientSession() as session:
+                            async with session.get(url, params=params) as response:
+                                if response.status == 200:
+                                    klines = await response.json()
+                                else:
+                                    logger.error(f"[HISTORICAL] Failed to get data for {symbol}: HTTP {response.status}")
+                                    continue
+                    
+                    if not klines:
+                        logger.warning(f"[HISTORICAL] No historical data found for {symbol}")
+                        continue
+                    
+                    # Process klines and update candles table
+                    candle_batch = []
+                    for kline in klines:
+                        candle_data = {
+                            'symbol': symbol,
+                            'timestamp': int(kline[0]),  # Open time
+                            'open': float(kline[1]),
+                            'high': float(kline[2]),
+                            'low': float(kline[3]),
+                            'close': float(kline[4]),
+                            'volume': float(kline[5])
+                        }
+                        candle_batch.append(candle_data)
+                    
+                    # Batch update candles table
+                    await candle_data_manager.batch_update_realtime_candles(candle_batch)
+                    
+                    logger.success(f"[HISTORICAL] Loaded {len(candle_batch)} candles for {symbol}")
+                    
+                    # Small delay to avoid rate limits
+                    await asyncio.sleep(0.5)
+                    
+                except Exception as e:
+                    logger.error(f"[HISTORICAL] Failed to load historical data for {symbol}: {e}")
+                    continue
+            
+            logger.success(f"[HISTORICAL] Historical data loading completed for {len(symbols)} symbols")
+            
+        except Exception as e:
+            logger.error(f"[HISTORICAL] Failed to load historical data: {e}")
     
     async def _emit_progress_event(self):
         """Emit WebSocket progress event"""
